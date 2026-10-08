@@ -52,6 +52,10 @@ QUESTION_JS = """el => {
 }"""
 
 
+class SessionLost(Exception):
+    """LinkedIn oturumu sonlandırdı (çerez geçersiz)."""
+
+
 def log(msg: str) -> None:
     print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
 
@@ -304,7 +308,13 @@ def collect_job_ids(page: Page) -> list[str]:
     for kw in CFG["search"]["keywords"]:
         for loc in CFG["search"]["locations"]:
             for p in range(CFG["search"]["pages_per_search"]):
-                page.goto(search_url(kw, loc) + f"&start={p * 25}", wait_until="domcontentloaded")
+                try:
+                    page.goto(search_url(kw, loc) + f"&start={p * 25}", wait_until="domcontentloaded")
+                except Exception as e:
+                    if "TOO_MANY_REDIRECTS" in str(e):
+                        raise SessionLost() from None
+                    log(f"  ! arama açılamadı: {str(e)[:100]}")
+                    break
                 pause(3, 5)
                 found = page.evaluate("""async () => {
                     const cards = [...document.querySelectorAll('[data-occludable-job-id], [data-job-id]')];
@@ -382,7 +392,11 @@ def main() -> int:
             return 1
         log("Giriş başarılı.")
 
-        job_ids = [j for j in collect_job_ids(page) if j not in applied]
+        try:
+            job_ids = [j for j in collect_job_ids(page) if j not in applied]
+        except SessionLost:
+            log("LinkedIn oturumu kapattı (çerez geçersiz kılındı). Yeni li_at çerezi gerekli.")
+            return 1
         log(f"İşlenecek yeni ilan: {len(job_ids)}")
 
         for job_id in job_ids:
