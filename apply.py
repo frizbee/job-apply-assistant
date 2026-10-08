@@ -5,9 +5,12 @@ Son 24 saatteki AI ilanlarını tarar, config.yaml'daki filtrelere uyanlara
 Easy Apply ile başvurur. Başvurulan ilanlar data/applied.json'da tutulur,
 böylece aynı ilana iki kez başvurulmaz.
 
+Oturum .browser-profile/ içinde saklanır; ilk çalıştırmada açılan Chrome
+penceresinde LinkedIn'e bir kez giriş yapılır.
+
 Ortam değişkenleri:
-  LI_AT    LinkedIn oturum çerezi (zorunlu)
-  DRY_RUN  "true" ise formları doldurur ama son adımda göndermez
+  DRY_RUN   "true" ise formları doldurur ama son adımda göndermez
+  HEADLESS  "true" ise pencere açmadan çalışır
 """
 import csv
 import datetime as dt
@@ -30,6 +33,7 @@ APPLIED_FILE = ROOT / "data" / "applied.json"
 LOG_FILE = ROOT / "data" / "applications.csv"
 LAST_RUN_FILE = ROOT / "data" / "last_run.txt"
 SHOTS = ROOT / "screenshots"
+PROFILE_DIR = ROOT / ".browser-profile"
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
 PROFILE = CFG["profile"]
@@ -359,43 +363,43 @@ def job_ok(title: str, company: str, description: str) -> str | None:
 # ---------------------------------------------------------------- main
 
 def main() -> int:
-    li_at = os.getenv("LI_AT")
-    if not li_at:
-        log("LI_AT ortam değişkeni yok.")
-        return 1
     applied = load_applied()
     log(f"Başlıyor (DRY_RUN={DRY_RUN}), daha önce işlenen ilan: {len(applied)}")
     count = 0
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=os.getenv("HEADLESS", "true").lower() == "true")
-        ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"),
+        # Kalıcı tarayıcı profili: LinkedIn'e bir kez elle giriş yapılır, oturum burada saklanır.
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            channel="chrome",
+            headless=os.getenv("HEADLESS", "false").lower() == "true",
             locale="en-US",
             viewport={"width": 1366, "height": 900},
+            args=["--disable-blink-features=AutomationControlled"],
         )
-        ctx.add_cookies([{"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/",
-                          "httpOnly": True, "secure": True}])
-        page = ctx.new_page()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(15000)
 
-        try:
-            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            pause(2, 4)
-            logged_in = not re.search(r"login|checkpoint|authwall|signup", page.url)
-        except Exception:  # geçersiz çerez -> ERR_TOO_MANY_REDIRECTS
-            logged_in = False
-        if not logged_in:
-            screenshot(page, "login_failed")
-            log(f"Giriş başarısız ({page.url}). LI_AT çerezi süresi dolmuş olabilir; yenisini secret olarak ekle.")
-            return 1
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        pause(2, 4)
+        if re.search(r"login|checkpoint|authwall|signup|uas/", page.url) or page.url.rstrip("/") == "https://www.linkedin.com":
+            log("Giriş yok. Açılan Chrome penceresinde LinkedIn'e giriş yap (10 dk bekleniyor)...")
+            if "login" not in page.url:
+                page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+            try:
+                page.wait_for_url(re.compile(r"linkedin\.com/(feed|in/|mynetwork|jobs)"), timeout=600_000)
+            except PWTimeout:
+                log("Giriş yapılmadı, çıkılıyor.")
+                ctx.close()
+                return 1
+            pause(3, 5)
         log("Giriş başarılı.")
 
         try:
             job_ids = [j for j in collect_job_ids(page) if j not in applied]
         except SessionLost:
-            log("LinkedIn oturumu kapattı (çerez geçersiz kılındı). Yeni li_at çerezi gerekli.")
+            log("LinkedIn oturumu kapattı. Tekrar çalıştırıp açılan pencerede giriş yap.")
+            ctx.close()
             return 1
         log(f"İşlenecek yeni ilan: {len(job_ids)}")
 
@@ -431,7 +435,7 @@ def main() -> int:
                 except Exception:
                     pass
 
-        browser.close()
+        ctx.close()
 
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count}\n")
     log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count}")
