@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------
+# LinkedIn Easy Apply ayarları. Her şeyi buradan değiştirebilirsin.
+# ---------------------------------------------------------------
+
+search:
+  keywords:
+    - "AI Engineer"
+    - "Machine Learning Engineer"
+    - "LLM Engineer"
+    - "Generative AI Engineer"
+    - "AI Agent Developer"
+    - "NLP Engineer"
+    - "Data Scientist"
+  locations:
+    - "European Union"
+    - "United Kingdom"
+    - "Türkiye"
+    - "United States"
+  remote_only: true            # sadece remote ilanlar (f_WT=2)
+  posted_within_hours: 24      # son 24 saatte yayınlanan ilanlar
+  experience_levels: [3, 4]    # 2=Entry 3=Associate 4=Mid-Senior 5=Director
+  pages_per_search: 2          # her arama için kaç sayfa (25 ilan/sayfa)
+
+filters:
+  # Başlık bunlardan en az birine uymalı (regex, küçük harf)
+  title_include:
+    - '\bai\b'
+    - 'artificial intelligence'
+    - 'machine learning'
+    - '\bml\b'
+    - '\bllm'
+    - 'gen ?ai|generative'
+    - '\bnlp\b'
+    - 'data scien'
+    - 'agent'
+    - 'rag\b'
+  # Başlıkta bunlar varsa atla
+  title_exclude:
+    - 'intern|internship|stajyer|werkstudent|praktikum|trainee'
+    - '\bjunior\b'
+    - 'director|vp\b|head of'
+    - 'phd'
+  # İlan metninde bunlar varsa atla (ör. yerel dil şartı)
+  description_exclude:
+    - 'fluent (in )?(german|french|dutch|spanish|italian|polish)'
+    - '(german|french|dutch)[- ]speaking'
+    - 'security clearance'
+    - 'us citizens? only'
+  exclude_companies: []
+
+limits:
+  max_applications_per_run: 25
+  max_runtime_minutes: 45
+
+profile:
+  phone: "5343997582"
+  city: "Istanbul, Türkiye"
+  linkedin: "https://www.linkedin.com/in/klncgty"
+  github: "https://github.com/klncgty"
+  default_years: 3             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
+  default_yes_no: "Yes"        # eşleşen kural yoksa Evet/Hayır sorusuna cevap
+  resume_file: "resume.pdf"    # sadece LinkedIn'de kayıtlı CV yoksa yüklenir
+  cover_letter: >-
+    Hi, I'm an AI/ML Engineer with 10+ years of Python and 4 years building
+    production RAG and agentic systems (LangGraph, LangChain, FAISS/Milvus,
+    OpenAI and Claude) shipped with FastAPI on GCP/Azure. I'm the creator of the
+    open-source pdfXtractor and LeakLens. I'd be glad to bring that experience
+    to your team. Portfolio: https://github.com/klncgty
+
+# "Kaç yıl deneyimin var?" sorularında soru metnine göre yıl (ilk eşleşen kazanır)
+skill_years:
+  'python': 10
+  'llm|langchain|langgraph|\brag\b|generative|gen ?ai|prompt|agent|openai|gpt|vector': 4
+  'machine learning|\bml\b|data scien|scikit|xgboost|pandas|sql|analytics|statistic': 6
+  'pytorch|deep learning|nlp|hugging ?face|transformer|fine.?tun': 4
+  'fastapi|flask|rest|api|backend': 5
+  'gcp|google cloud|azure|cloud': 3
+  'docker|kubernetes|mlops|ci/cd': 2
+  'react|javascript|typescript': 2
+
+# Form soruları için kurallar. Soru metni (küçük harf) "match" regex'ine uyarsa
+# "answer" kullanılır. Liste verirsen seçenekli sorularda sırayla denenir.
+# Sıra önemli: ilk eşleşen kazanır.
+answers:
+  - match: 'country code|ülke kodu'
+    answer: ["Turkey (+90)", "Türkiye (+90)", "+90"]
+  - match: 'phone|mobile|telefon'
+    answer: "5343997582"
+  - match: '(turkey|türkiye).*(authori[sz]ed|legally|permit|eligible)|(authori[sz]ed|legally|permit|eligible).*(turkey|türkiye)'
+    answer: "Yes"
+  - match: 'sponsor|visa'
+    answer: "No"               # remote çalışacağın için; onsite yurtdışı ilanlarda "Yes" olmalı
+  - match: 'authori[sz]ed to work|legally (authori[sz]ed|allowed|eligible)|work permit|right to work|citizen'
+    answer: "No"
+  - match: 'remote'
+    answer: "Yes"
+  - match: 'relocat'
+    answer: "Yes"
+  - match: 'commut|on-?site|in the office|hybrid'
+    answer: "No"
+  - match: 'english'
+    answer: ["Professional", "Fluent", "Advanced", "Yes"]
+  - match: 'turkish'
+    answer: ["Native", "Yes"]
+  - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
+    answer: "60000"            # yıllık USD/EUR beklenti — kendine göre güncelle
+  - match: 'notice period|ihbar'
+    answer: "14"
+  - match: 'start date|available to start|when can you start'
+    answer: ["Immediately", "2 weeks"]
+  - match: "bachelor|degree|lisans"
+    answer: ["Yes", "Bachelor's Degree", "Bachelor"]
+  - match: 'education|highest level'
+    answer: ["Bachelor's Degree", "Bachelor", "Lisans"]
+  - match: 'gender|race|ethnic|veteran|disabilit|pronoun|sexual orientation'
+    answer: ["Decline to self-identify", "I don't wish to answer", "Prefer not to say", "Decline", "I do not want to answer"]
+  - match: 'hear about|how did you find'
+    answer: ["LinkedIn"]
+  - match: 'linkedin'
+    answer: "https://www.linkedin.com/in/klncgty"
+  - match: 'github|portfolio|website|personal site'
+    answer: "https://github.com/klncgty"
+  - match: '\bcity\b|location|şehir|where are you (based|located)'
+    answer: "Istanbul, Türkiye"
+  - match: 'cover letter|why (are you|do you want)|interested in|additional information|tell us|about yourself|message to the hiring'
+    answer: "__COVER_LETTER__"
+  - match: 'privacy|consent|agree|terms|acknowledge'
+    answer: ["Yes", "I agree", "I Agree", "Agree"]
