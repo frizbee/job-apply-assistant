@@ -146,11 +146,45 @@ def answer(question: str, numeric: bool = False) -> list[str]:
     return result
 
 
+def year_range(option: str) -> tuple[float, float] | None:
+    """'Less than 1 year' -> (0, 1), '1-3 years' -> (1, 3), '5+ years' -> (5, inf), 'None' -> (0, 0)."""
+    o = option.lower()
+    if re.fullmatch(r"\s*(none|no experience|0|hiç|yok)\s*", o):
+        return (0, 0)
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", o)]
+    if not nums:
+        return None
+    if re.search(r"less than|under|fewer than|<|az|below|up to", o):
+        return (0, nums[0])
+    if re.search(r"\+|more than|over|above|or more|at least|>|üzeri|fazla", o):
+        return (nums[0], float("inf"))
+    if len(nums) >= 2:
+        return (nums[0], nums[1])
+    return (nums[0], nums[0])
+
+
+def choose_years(years: float, opts: list[tuple[int, str]]) -> int | None:
+    """Yıl aralıklı seçeneklerden (en az yarısı aralıksa) sayının düştüğünü, yoksa en yakınını seç."""
+    ranges = [(i, year_range(o)) for i, o in opts]
+    ranges = [(i, r) for i, r in ranges if r]
+    if len(ranges) < max(2, len(opts) // 2):
+        return None
+    inside = [i for i, (lo, hi) in ranges if lo <= years <= hi or (lo <= years < hi)]
+    if inside:
+        return inside[-1]
+    return min(ranges, key=lambda x: min(abs(years - x[1][0]), abs(years - x[1][1])))[0]
+
+
 def choose_option(question: str, options: list[str]) -> int | None:
     """Seçenekler arasından cevabın index'ini döndür."""
     opts = [(i, o.strip()) for i, o in enumerate(options) if o.strip() and not PLACEHOLDER_RE.search(o)]
     if not opts:
         return None
+    if YEARS_RE.search(question) or re.search(r"experience|deneyim|tecrübe", question, re.I):
+        years = answer(question, numeric=True)
+        idx = choose_years(float(years[0]), opts) if years else None
+        if idx is not None:
+            return idx
     for cand in answer(question) + [PROFILE["default_yes_no"]]:
         c = cand.lower()
         for i, o in opts:

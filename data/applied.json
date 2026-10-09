@@ -8,8 +8,8 @@
   "date": "2026-10-08"
  },
  "4476367753": {
-  "status": "no_easy_apply",
-  "date": "2026-10-08"
+  "status": "external_unanswered",
+  "date": "2026-10-09"
  },
  "4407747740": {
   "status": "no_easy_apply",
@@ -76,11 +76,11 @@
   "date": "2026-10-09"
  },
  "4476286535": {
-  "status": "no_easy_apply",
+  "status": "external_manual",
   "date": "2026-10-09"
  },
  "4473336787": {
-  "status": "no_easy_apply",
+  "status": "external_manual",
   "date": "2026-10-09"
  },
  "4475565669": {
@@ -237,6 +237,18 @@
  },
  "4472161056": {
   "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4468037461": {
+  "status": "external_manual",
+  "date": "2026-10-09"
+ },
+ "4465530322": {
+  "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4469416589": {
+  "status": "skipped_unanswered",
   "date": "2026-10-09"
  }
 }
