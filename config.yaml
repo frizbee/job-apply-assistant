@@ -89,6 +89,8 @@ answers:
     answer: "Yes"
   - match: 'relocat'
     answer: "Yes"
+  - match: '(commut|on-?site|office|hybrid).*(istanbul|i̇stanbul|sarıyer|maslak|levent|kadıköy|ataşehir|türkiye|turkey)|(istanbul|i̇stanbul|türkiye|turkey).*(commut|on-?site|office|hybrid)'
+    answer: "Yes"             # İstanbul ofisine gidebilirim
   - match: 'commut|on-?site|in the office|hybrid'
     answer: "No"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'

@@ -1,22 +1,78 @@
 {
- "4468995987": {
-  "status": "title_not_relevant",
-  "date": "2026-10-08"
- },
- "4467443874": {
-  "status": "title_not_relevant",
-  "date": "2026-10-08"
- },
  "4472513059": {
-  "status": "title_not_relevant",
+  "status": "skipped_unanswered",
   "date": "2026-10-08"
  },
- "4469319143": {
-  "status": "title_not_relevant",
+ "4472198184": {
+  "status": "skipped_unanswered",
   "date": "2026-10-08"
  },
- "4472145322": {
-  "status": "title_not_relevant",
+ "4476367753": {
+  "status": "no_easy_apply",
   "date": "2026-10-08"
+ },
+ "4407747740": {
+  "status": "no_easy_apply",
+  "date": "2026-10-08"
+ },
+ "4432280026": {
+  "status": "no_easy_apply",
+  "date": "2026-10-08"
+ },
+ "4463444503": {
+  "status": "skipped_no_button",
+  "date": "2026-10-08"
+ },
+ "4466331456": {
+  "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4466301799": {
+  "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4475411714": {
+  "status": "no_easy_apply",
+  "date": "2026-10-09"
+ },
+ "4475211686": {
+  "status": "skipped_unanswered",
+  "date": "2026-10-09"
+ },
+ "4467198072": {
+  "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4476554763": {
+  "status": "modal_not_opened",
+  "date": "2026-10-09"
+ },
+ "4472934012": {
+  "status": "title_not_relevant",
+  "date": "2026-10-09"
+ },
+ "4473484379": {
+  "status": "no_easy_apply",
+  "date": "2026-10-09"
+ },
+ "4472864067": {
+  "status": "no_easy_apply",
+  "date": "2026-10-09"
+ },
+ "4403535141": {
+  "status": "no_easy_apply",
+  "date": "2026-10-09"
+ },
+ "4466247694": {
+  "status": "applied",
+  "date": "2026-10-09"
+ },
+ "4464787381": {
+  "status": "skipped_unanswered",
+  "date": "2026-10-09"
+ },
+ "4455785297": {
+  "status": "no_easy_apply",
+  "date": "2026-10-09"
  }
 }

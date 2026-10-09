@@ -177,7 +177,11 @@ RADIO_GROUP_JS = r"""fs => {
     ? roles.map(r => lines(r).pop() || '')
     : [...fs.querySelectorAll('input[type=radio]')].map(r => {
         const l = r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`);
-        return t((l && l.innerText) || (r.parentElement && r.parentElement.innerText));
+        if (l && t(l.innerText)) return t(l.innerText);
+        // Etiket boşsa metni olan en yakın üst öğe (seçenek satırı)
+        let p = r.parentElement;
+        while (p && p !== fs && !t(p.innerText)) p = p.parentElement;
+        return p && p !== fs ? t(p.innerText) : '';
       });
   let q = '';
   const lg = fs.querySelector('legend');
@@ -266,11 +270,13 @@ def fill_step(page: Page, modal: Locator) -> None:
                 items.nth(idx).click()
             else:
                 radio = fs.locator("input[type='radio']").nth(idx)
-                rid = radio.get_attribute("id")
-                label = fs.locator(f"label[for='{rid}']") if rid else None
-                if label is not None and label.count():
-                    label.first.click()
-                else:
+                # Metni olan en yakın üst öğe = tıklanabilir seçenek satırı
+                row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                try:
+                    row.click(timeout=5000)
+                except PWTimeout:
+                    radio.check(force=True)
+                if not fs.locator("input[type='radio']:checked").count():
                     radio.check(force=True)
             pause(0.3, 0.7)
         except Exception as e:
