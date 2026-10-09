@@ -42,6 +42,9 @@ EXTERNAL = CFG.get("external", {}).get("enabled", False)
 
 EASY_APPLY_RE = re.compile(r"easy apply|kolay başvuru", re.I)
 PLACEHOLDER_RE = re.compile(r"select an option|seçenek belirleyin|seçin|seçiniz|wybierz|bitte wählen|choose an option", re.I)
+OPEN_QUESTION_RE = re.compile(
+    r"describe|explain|tell us|tell me|walk us|example|how (do|did|would|have) you|why|"
+    r"what (is|was|are|were) your|share|elaborate|anlat|açıkla|neden", re.I)
 YEARS_RE = re.compile(r"how many years|years of|yıl|ile lat|wie viele jahre|combien d.ann|cuántos años", re.I)
 
 QUESTION_JS = r"""el => {
@@ -450,6 +453,13 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             numeric = el.get_attribute("type") == "number" or "numeric" in (el.get_attribute("id") or "")
             # Dolu ama geçersiz alan genelde sayı bekliyor
             cands = answer(q, numeric=numeric or invalid)
+            if not cands and OPEN_QUESTION_RE.search(q):
+                # Açık uçlu soru: uzun metin alan alanlara ön yazıyı yaz
+                maxlen = int(el.get_attribute("maxlength") or 0)
+                is_long = el.evaluate("e => e.tagName") == "TEXTAREA" or not maxlen or maxlen >= len(PROFILE["cover_letter"])
+                if is_long:
+                    log(f"    ~ ön yazı ile cevaplandı: {q[:80]}")
+                    cands = [PROFILE["cover_letter"]]
             if not cands:
                 log(f"    ? cevapsız soru: {q[:90]}")
                 unanswered.append(q)
