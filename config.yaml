@@ -17,29 +17,22 @@ search:
     - "Türkiye"
     - "United States"
   remote_only: true            # sadece remote ilanlar (f_WT=2)
-  posted_within_hours: 24      # son 24 saatte yayınlanan ilanlar
-  experience_levels: [3, 4]    # 2=Entry 3=Associate 4=Mid-Senior 5=Director
+  posted_within_hours: 168     # son 1 haftada yayınlanan ilanlar
+  experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
   pages_per_search: 2          # her arama için kaç sayfa (25 ilan/sayfa)
 
 filters:
   # Başlık bunlardan en az birine uymalı (regex, küçük harf)
   title_include:
-    - '\bai\b'
-    - 'artificial intelligence'
-    - 'machine learning'
-    - '\bml\b'
-    - '\bllm'
-    - 'gen ?ai|generative'
-    - '\bnlp\b'
-    - 'data scien'
-    - 'agent'
-    - 'rag\b'
+    - '\bai\b|a\.i\.|artificial intelligence'
+    - 'machine learning|\bml\b|mlops|deep learning|computer vision|\bcv\b'
+    - '\bllm|gen ?ai|generative|\bnlp\b|prompt|agent|\brag\b|chatbot|conversational'
+    - 'data|analyst|analytics|scien|research'
+    - 'python|backend|back-end|software|developer|engineer|automation|platform|cloud|api'
+    - 'yapay zeka|veri|yazılım|mühendis|geliştirici|analist|otomasyon'
   # Başlıkta bunlar varsa atla
   title_exclude:
     - 'intern|internship|stajyer|werkstudent|praktikum|trainee'
-    - '\bjunior\b'
-    - 'director|vp\b|head of'
-    - 'phd'
   # İlan metninde bunlar varsa atla (ör. yerel dil şartı)
   description_exclude:
     - 'fluent (in )?(german|french|dutch|spanish|italian|polish)'
@@ -82,7 +75,7 @@ skill_years:
 # "answer" kullanılır. Liste verirsen seçenekli sorularda sırayla denenir.
 # Sıra önemli: ilk eşleşen kazanır.
 answers:
-  - match: 'country code|ülke kodu'
+  - match: 'country code|ülke.*kodu'
     answer: ["Turkey (+90)", "Türkiye (+90)", "+90"]
   - match: 'phone|mobile|telefon'
     answer: "5343997582"
@@ -98,10 +91,12 @@ answers:
     answer: "Yes"
   - match: 'commut|on-?site|in the office|hybrid'
     answer: "No"
-  - match: 'english'
-    answer: ["Professional", "Fluent", "Advanced", "Yes"]
-  - match: 'turkish'
-    answer: ["Native", "Yes"]
+  - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
+    answer: ["Professional", "Fluent", "Advanced", "Biegły", "Zaawansowany", "C1", "Yes"]
+  - match: 'turkish|turecki|türkisch|türkçe'
+    answer: ["Native", "Ojczysty", "Muttersprache", "Yes"]
+  - match: 'studying|student|enrolled|öğrenci'
+    answer: "No"
   - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
     answer: "60000"            # yıllık USD/EUR beklenti — kendine göre güncelle
   - match: 'notice period|ihbar'
