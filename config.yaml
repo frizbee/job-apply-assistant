@@ -41,18 +41,30 @@ filters:
     - 'us citizens? only'
   exclude_companies: []
 
+# Kolay Başvuru olmayan ilanlar: şirket sitesindeki formu doldurur.
+# Greenhouse, Lever ve Ashby desteklenir; diğerleri data/manual_apply.csv'ye yazılır.
+external:
+  enabled: true
+
 limits:
   max_applications_per_run: 25
   max_runtime_minutes: 45
 
 profile:
+  first_name: "Çağatay"
+  last_name: "Kılınç"
+  full_name: "Çağatay Kılınç"
+  email: "cgtyklnc@gmail.com"
   phone: "5343997582"
+  phone_intl: "+90 534 399 75 82"
+  current_company: ""          # dış formlarda "şu anki şirket" alanı (boşsa doldurulmaz)
+  current_title: "AI Engineer"
   city: "Istanbul, Türkiye"
   linkedin: "https://www.linkedin.com/in/klncgty"
   github: "https://github.com/klncgty"
   default_years: 3             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
   default_yes_no: "Yes"        # eşleşen kural yoksa Evet/Hayır sorusuna cevap
-  resume_file: "resume.pdf"    # sadece LinkedIn'de kayıtlı CV yoksa yüklenir
+  resume_file: "Cagatay_Kilinc_CV_AI_2026.pdf"    # sadece LinkedIn'de kayıtlı CV yoksa yüklenir
   cover_letter: >-
     Hi, I'm an AI/ML Engineer with 10+ years of Python and 4 years building
     production RAG and agentic systems (LangGraph, LangChain, FAISS/Milvus,
@@ -94,16 +106,16 @@ answers:
   - match: 'commut|on-?site|in the office|hybrid'
     answer: "No"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
-    answer: ["Professional", "Fluent", "Advanced", "Biegły", "Zaawansowany", "C1", "Yes"]
+    answer: ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany", "Yes"]  # konuşma seviyesi
   - match: 'turkish|turecki|türkisch|türkçe'
     answer: ["Native", "Ojczysty", "Muttersprache", "Yes"]
   - match: 'studying|student|enrolled|öğrenci'
     answer: "No"
   - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
-    answer: "60000"            # yıllık USD/EUR beklenti — kendine göre güncelle
+    answer: "75000"            # yıllık USD/EUR beklenti
   - match: 'notice period|ihbar'
     answer: "14"
-  - match: 'start date|available to start|when can you start'
+  - match: 'start date|availab\w* to start|when can you start|start a new role'
     answer: ["Immediately", "2 weeks"]
   - match: "bachelor|degree|lisans"
     answer: ["Yes", "Bachelor's Degree", "Bachelor"]
@@ -117,9 +129,13 @@ answers:
     answer: "https://www.linkedin.com/in/klncgty"
   - match: 'github|portfolio|website|personal site'
     answer: "https://github.com/klncgty"
+  - match: 'country.*(located|live|reside|based)|which country|country of residence'
+    answer: ["Türkiye", "Turkey"]
+  - match: 'rag|retrieval|vector (db|database|store)'
+    answer: "FAISS and Milvus vector stores, LangChain/LangGraph retrievers, hybrid search (BM25 + embeddings), rerankers, chunking and metadata filtering"
   - match: '\bcity\b|location|şehir|where are you (based|located)'
     answer: "Istanbul, Türkiye"
-  - match: 'cover letter|why (are you|do you want)|interested in|additional information|tell us|about yourself|message to the hiring'
+  - match: 'cover letter|why (are you|do you want)|interested in|additional information|anything else|tell us|about yourself|message to the hiring'
     answer: "__COVER_LETTER__"
   - match: 'privacy|consent|agree|terms|acknowledge'
     answer: ["Yes", "I agree", "I Agree", "Agree"]

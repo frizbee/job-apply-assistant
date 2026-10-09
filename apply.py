@@ -32,11 +32,13 @@ CFG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
 APPLIED_FILE = ROOT / "data" / "applied.json"
 LOG_FILE = ROOT / "data" / "applications.csv"
 LAST_RUN_FILE = ROOT / "data" / "last_run.txt"
+MANUAL_FILE = ROOT / "data" / "manual_apply.csv"
 SHOTS = ROOT / "screenshots"
 PROFILE_DIR = ROOT / ".browser-profile"
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
 PROFILE = CFG["profile"]
+EXTERNAL = CFG.get("external", {}).get("enabled", False)
 
 EASY_APPLY_RE = re.compile(r"easy apply|kolay başvuru", re.I)
 PLACEHOLDER_RE = re.compile(r"select an option|seçenek belirleyin|seçin|seçiniz|wybierz|bitte wählen|choose an option", re.I)
@@ -71,7 +73,7 @@ QUESTION_JS = r"""el => {
 
 
 # Bu durumlarla kaydedilen ilanlar sonraki çalıştırmada tekrar denenir
-RETRY_PREFIXES = ("skipped_", "modal_not_opened")
+RETRY_PREFIXES = ("skipped_", "modal_not_opened") + (("no_easy_apply",) if EXTERNAL else ())
 
 
 class LimitReached(Exception):
@@ -114,7 +116,7 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str) ->
 def screenshot(page: Page, name: str) -> None:
     SHOTS.mkdir(exist_ok=True)
     try:
-        page.screenshot(path=str(SHOTS / f"{name}.png"))
+        page.screenshot(path=str(SHOTS / f"{name}.png"), full_page="_ext_" in name)
     except Exception:
         pass
 
@@ -210,11 +212,188 @@ def fill_date(el: Locator) -> None:
     log("    ! tarih alanı doldurulamadı")
 
 
-def fill_step(page: Page, modal: Locator) -> None:
+def fill_radios(scope: Locator) -> list[str]:
+    """Radyo butonlu sorular; cevaplanamayanları döndürür. Yeni LinkedIn formunda
+    seçenekler div[role=radio] ve <label> boş; eski formda <legend> + <label for>."""
+    unanswered: list[str] = []
+    # İç içe gruplar iki kez gelebilir; ikincisi zaten seçili olduğu için atlanır
+    for fs in scope.locator("fieldset:has(input[type='radio']), [role='radiogroup']").all():
+        try:
+            if fs.locator("input[type='radio']:checked, [role='radio'][aria-checked='true']").count():
+                continue
+            q, labels = fs.evaluate(RADIO_GROUP_JS)
+            idx = choose_option(q, labels)
+            if idx is None:
+                log(f"    ? cevapsız soru: {q[:90]}")
+                unanswered.append(q)
+                continue
+            items = fs.locator("[role='radio']")
+            if items.count():
+                items.nth(idx).click()
+            else:
+                radio = fs.locator("input[type='radio']").nth(idx)
+                # Metni olan en yakın üst öğe = tıklanabilir seçenek satırı
+                row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                try:
+                    row.click(timeout=5000)
+                except PWTimeout:
+                    radio.check(force=True)
+                if not fs.locator("input[type='radio']:checked").count():
+                    radio.check(force=True)
+            pause(0.3, 0.7)
+        except Exception as e:
+            log(f"    ! radio doldurulamadı: {e.__class__.__name__}")
+    return unanswered
+
+
+# Dış sitelerdeki standart alanlar: (soru/name/id regex'i, profile anahtarı). İlk eşleşen kazanır.
+STANDARD_FIELDS = [
+    (r"first.?name|given.?name|vorname|\bad[ıi]?\b(?!.*soyad)", "first_name"),
+    (r"last.?name|surname|family.?name|soyad|nachname", "last_name"),
+    (r"full.?name|^name\b|your name|ad soyad", "full_name"),
+    (r"e-?mail", "email"),
+    (r"phone|mobile|telefon|\btel\b", "phone_intl"),
+    (r"linkedin", "linkedin"),
+    (r"github", "github"),
+    (r"website|portfolio|personal (site|url)|other url", "github"),
+    (r"current (company|employer)|^org\b| org$", "current_company"),
+    (r"current (title|position|role)", "current_title"),
+    (r"\blocation|\bcity\b|şehir|where are you (based|located)", "city"),
+]
+
+
+def fill_combobox(page: Page, el: Locator, q: str) -> bool:
+    """Greenhouse/Ashby'deki aranabilir açılır listeler (role=combobox)."""
+    std = standard_answer(el, q)
+    cands = [std] if std else answer(q) + [PROFILE["default_yes_no"]]
+    try:
+        el.click()
+        pause(0.5, 1)
+        if std:
+            el.fill(std.split(",")[0])
+            pause(1.5, 2.5)
+        opts = page.locator("[role='option']:visible")
+        texts = opts.all_inner_texts()
+        if not texts:
+            el.press("Escape")
+            return False
+        idx = choose_option(q, texts) if not std else 0
+        opts.nth(idx or 0).click()
+        pause(0.3, 0.7)
+        return True
+    except Exception as e:
+        log(f"    ! liste doldurulamadı: {e.__class__.__name__}")
+        return False
+
+
+YESNO_JS = r"""root => {
+  // Yes/No düğme çiftleri (Ashby). Her çift için [soru, seçili mi] döndürür; düğmeleri işaretler.
+  const t = s => (s || '').replace(/\s+/g, ' ').trim();
+  const out = [];
+  const yes = [...root.querySelectorAll('button')].filter(b => /^(yes|evet)$/i.test(t(b.innerText)));
+  for (const b of yes) {
+    const box = b.parentElement;
+    const btns = [...box.querySelectorAll('button')];
+    if (btns.length !== 2 || !/^(no|hayır)$/i.test(t(btns[1].innerText))) continue;
+    let p = box.parentElement, q = '';
+    for (let i = 0; i < 5 && p && !q; i++, p = p.parentElement)
+      q = (p.innerText || '').split('\n').map(t).find(l => l && !/^(yes|no|evet|hayır)$/i.test(l)) || '';
+    const picked = btns.some(x => /active|selected/i.test(x.className) || x.getAttribute('aria-pressed') === 'true');
+    box.setAttribute('data-yesno', out.length);
+    out.push([q, picked]);
+  }
+  return out;
+}"""
+
+CHECKGROUP_JS = r"""root => {
+  // Çoklu seçim soruları: aynı kapta 2+ onay kutusu. [soru, seçenekler, herhangi biri seçili mi]
+  const t = s => (s || '').replace(/\s+/g, ' ').trim();
+  const label = c => {
+    const l = c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`);
+    if (l && t(l.innerText)) return t(l.innerText);
+    let p = c.parentElement;
+    while (p && !t(p.innerText)) p = p.parentElement;
+    return p ? t(p.innerText) : '';
+  };
+  const groups = new Map();
+  for (const c of root.querySelectorAll('input[type=checkbox]')) {
+    let g = c.parentElement;
+    while (g && g !== root && g.querySelectorAll('input[type=checkbox]').length < 2) g = g.parentElement;
+    if (!g || g === root) continue;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(c);
+  }
+  const out = [];
+  for (const [g, cbs] of groups) {
+    const opts = cbs.map(label);
+    let p = g, q = '';
+    for (let i = 0; i < 4 && p && !q; i++, p = p.parentElement)
+      q = (p.innerText || '').split('\n').map(t).find(l => l && !opts.includes(l)) || '';
+    g.setAttribute('data-checkgroup', out.length);
+    out.push([q, opts, cbs.some(c => c.checked)]);
+  }
+  return out;
+}"""
+
+
+def fill_yesno(scope: Locator) -> list[str]:
+    unanswered = []
+    for i, (q, picked) in enumerate(scope.evaluate(YESNO_JS)):
+        if picked:
+            continue
+        idx = choose_option(q, ["Yes", "No"])
+        try:
+            scope.locator(f"[data-yesno='{i}'] button").nth(idx or 0).click()
+            pause(0.3, 0.6)
+        except Exception:
+            unanswered.append(q)
+    return unanswered
+
+
+def fill_checkgroups(scope: Locator) -> None:
+    """Çoklu seçimde config'teki kurala, yoksa skill_years'taki becerilere uyan seçenekleri işaretler."""
+    for i, (q, opts, any_checked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
+        if any_checked:
+            continue
+        cands = [c.lower() for c in answer(q)]
+        pick = [j for j, o in enumerate(opts) if any(c and c in o.lower() for c in cands)]
+        if not pick:
+            pick = [j for j, o in enumerate(opts)
+                    if any(re.search(pat, o.lower()) for pat in CFG["skill_years"])]
+        if not pick:
+            pick = [j for j, o in enumerate(opts) if not re.search(r"none|other|hiçbiri|diğer", o, re.I)][:1]
+        cbs = scope.locator(f"[data-checkgroup='{i}'] input[type='checkbox']")
+        for j in pick:
+            try:
+                cb = cbs.nth(j)
+                row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                try:
+                    row.click(timeout=4000)
+                except PWTimeout:
+                    cb.check(force=True)
+                if not cb.is_checked():
+                    cb.check(force=True)
+            except Exception as e:
+                log(f"    ! onay kutusu seçilemedi: {e.__class__.__name__}")
+
+
+def standard_answer(el: Locator, q: str) -> str | None:
+    """Dış sitelerdeki ad/e-posta/telefon gibi standart alanlar."""
+    key = " ".join([q, el.get_attribute("name") or "", el.get_attribute("id") or "",
+                    el.get_attribute("autocomplete") or ""]).lower()
+    for pattern, field in STANDARD_FIELDS:
+        if re.search(pattern, key):
+            return PROFILE.get(field) or None
+    return None
+
+
+def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
+    """Formdaki boş alanları doldurur; cevaplanamayan soruları döndürür."""
+    unanswered: list[str] = []
     # Metin alanları
     fields = modal.locator(
         "input[type='text']:visible, input[type='tel']:visible, input[type='email']:visible, "
-        "input[type='number']:visible, input:not([type]):visible, textarea:visible"
+        "input[type='number']:visible, input[type='url']:visible, input:not([type]):visible, textarea:visible"
     )
     for el in fields.all():
         try:
@@ -225,11 +404,21 @@ def fill_step(page: Page, modal: Locator) -> None:
                 fill_date(el)
                 continue
             q = question_of(el)
+            if external and el.get_attribute("role") == "combobox":
+                if not fill_combobox(page, el, q):
+                    unanswered.append(q)
+                continue
+            std = standard_answer(el, q) if external else None
+            if std:
+                el.fill(std)
+                pause(0.3, 0.8)
+                continue
             numeric = el.get_attribute("type") == "number" or "numeric" in (el.get_attribute("id") or "")
             # Dolu ama geçersiz alan genelde sayı bekliyor
             cands = answer(q, numeric=numeric or invalid)
             if not cands:
                 log(f"    ? cevapsız soru: {q[:90]}")
+                unanswered.append(q)
                 continue
             el.fill(cands[0])
             pause(0.6, 1.2)
@@ -254,33 +443,7 @@ def fill_step(page: Page, modal: Locator) -> None:
         except Exception as e:
             log(f"    ! select doldurulamadı: {e.__class__.__name__}")
 
-    # Radyo butonlu sorular. Yeni formda seçenekler div[role=radio], <label> boş;
-    # eski formda <legend> + <label for>.
-    for fs in modal.locator("fieldset:has(input[type='radio'])").all():
-        try:
-            if fs.locator("input[type='radio']:checked, [role='radio'][aria-checked='true']").count():
-                continue
-            q, labels = fs.evaluate(RADIO_GROUP_JS)
-            idx = choose_option(q, labels)
-            if idx is None:
-                log(f"    ? cevapsız soru: {q[:90]}")
-                continue
-            items = fs.locator("[role='radio']")
-            if items.count():
-                items.nth(idx).click()
-            else:
-                radio = fs.locator("input[type='radio']").nth(idx)
-                # Metni olan en yakın üst öğe = tıklanabilir seçenek satırı
-                row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
-                try:
-                    row.click(timeout=5000)
-                except PWTimeout:
-                    radio.check(force=True)
-                if not fs.locator("input[type='radio']:checked").count():
-                    radio.check(force=True)
-            pause(0.3, 0.7)
-        except Exception as e:
-            log(f"    ! radio doldurulamadı: {e.__class__.__name__}")
+    unanswered += fill_radios(modal)
 
     # Onay kutuları (şartları kabul et vb.)
     for cb in modal.locator("input[type='checkbox']:not(:checked)").all():
@@ -291,8 +454,24 @@ def fill_step(page: Page, modal: Locator) -> None:
             except Exception:
                 pass
 
-    # CV: sadece hiç kayıtlı CV yoksa yükle
     resume = ROOT / PROFILE["resume_file"]
+    if external:
+        unanswered += fill_yesno(modal)
+        fill_checkgroups(modal)
+        # Dış sitelerde CV her zaman yüklenir; ön yazı dosyası alanları atlanır
+        for fi in modal.locator("input[type='file']").all():
+            key = (question_of(fi) + " " + (fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")).lower()
+            if re.search(r"cover", key) or not resume.exists():
+                continue
+            if re.search(r"resume|\bcv\b|lebenslauf|özgeçmiş", key) or modal.locator("input[type='file']").count() == 1:
+                try:
+                    fi.set_input_files(str(resume))
+                    pause(2, 3)
+                except Exception as e:
+                    log(f"    ! CV yüklenemedi: {e.__class__.__name__}")
+        return unanswered
+
+    # CV: sadece hiç kayıtlı CV yoksa yükle
     if resume.exists() and modal.locator("input[type='file']").count():
         has_doc = re.search(r"\.pdf|\.docx?", modal.inner_text(), re.I)
         if not has_doc:
@@ -301,6 +480,7 @@ def fill_step(page: Page, modal: Locator) -> None:
                 pause(2, 3)
             except Exception:
                 pass
+    return unanswered
 
 
 MODAL = "dialog[open], div[role='dialog']"
@@ -381,6 +561,145 @@ def apply_to_job(page: Page, job_id: str) -> str:
     return "skipped_too_many_steps"
 
 
+# ---------------------------------------------------------------- external (şirket sitesi)
+
+ATS = {
+    "greenhouse": re.compile(r"greenhouse\.io"),
+    "lever": re.compile(r"jobs\.(eu\.)?lever\.co"),
+    "ashby": re.compile(r"jobs\.ashbyhq\.com"),
+}
+APPLY_BTN_RE = re.compile(r"\bapply\b|başvur", re.I)
+SUBMIT_RE = re.compile(r"submit|send application|apply|başvur|gönder", re.I)
+DONE_RE = re.compile(
+    r"thank(s| you)|application (was |has been )?(received|submitted|sent)|we.ve received|"
+    r"successfully (submitted|applied)|teşekkür|başvurunuz (alındı|iletildi)", re.I)
+CAPTCHA_SEL = "iframe[src*='hcaptcha'][title*='challenge'], iframe[src*='recaptcha'][title*='challenge']:visible"
+
+
+def record_manual(job_id: str, title: str, company: str, url: str, reason: str) -> None:
+    new_file = not MANUAL_FILE.exists()
+    with MANUAL_FILE.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(["date", "job_id", "title", "company", "reason", "apply_url"])
+        w.writerow([dt.date.today().isoformat(), job_id, title, company, reason, url])
+
+
+def external_url(page: Page) -> str | None:
+    """LinkedIn'deki 'Başvur' butonuna basıp şirket sitesinin adresini döndürür."""
+    btn = page.get_by_role("button", name=APPLY_BTN_RE).or_(page.get_by_role("link", name=APPLY_BTN_RE))
+    btn = btn.filter(has_not_text=EASY_APPLY_RE).first
+    if not btn.count():
+        return None
+    ctx = page.context
+    before = len(ctx.pages)
+    btn.click()
+    for _ in range(30):
+        time.sleep(0.5)
+        if len(ctx.pages) > before:
+            new = ctx.pages[-1]
+            try:
+                new.wait_for_load_state("domcontentloaded", timeout=20000)
+                pause(2, 3)
+            except PWTimeout:
+                pass
+            url = new.url
+            new.close()
+            return url
+        # "Profilini paylaş / Devam et" ara penceresi
+        cont = page.locator(MODAL).get_by_role("button", name=re.compile(r"continue|devam", re.I))
+        if cont.count():
+            cont.first.click()
+    return None
+
+
+def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
+    """Başvuru formunun doğrudan adresi ve ATS adı. Şirket sitesine gömülü formları da bulur."""
+    for name, rx in ATS.items():
+        if rx.search(url):
+            break
+    else:
+        # Şirket sitesine gömülü Greenhouse/Ashby/Lever iframe'i
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            pause(3, 4)
+        except Exception:
+            return None, "unknown"
+        for fr in page.frames:
+            for name, rx in ATS.items():
+                if rx.search(fr.url):
+                    url = fr.url
+                    break
+            else:
+                continue
+            break
+        else:
+            return None, "unknown"
+    if name == "lever" and not re.search(r"/apply/?(\?|$)", url):
+        url = re.sub(r"/?(\?.*)?$", r"/apply\1", url, count=1)
+    elif name == "ashby" and "/application" not in url:
+        url = re.sub(r"/?(\?.*)?$", r"/application\1", url, count=1)
+    return url, name
+
+
+def apply_external(page: Page, job_id: str, title: str, company: str) -> str:
+    url = external_url(page)
+    if not url:
+        return "no_apply_button"
+    form_url, ats = ats_apply_url(page, url)
+    if not form_url:
+        record_manual(job_id, title, company, url, "unsupported_site")
+        return "external_manual"
+    log(f"  -> {ats}: {form_url[:90]}")
+    page.goto(form_url, wait_until="domcontentloaded", timeout=30000)
+    pause(3, 5)
+    if ats == "ashby":
+        tab = page.get_by_role("tab", name=re.compile(r"application", re.I))
+        if tab.count():
+            tab.first.click()
+            pause(1.5, 2.5)
+    form = page.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
+    if not form.count():
+        form = page.locator("body")
+
+    unanswered = fill_step(page, form, external=True)
+    pause(1, 2)
+    unanswered = fill_step(page, form, external=True)  # açılan koşullu sorular için ikinci tur
+    required_empty = form.locator(
+        "input[required]:visible, textarea[required]:visible, [aria-required='true']:visible"
+    ).evaluate_all("els => els.filter(e => 'value' in e && !e.value.trim() && e.type !== 'file').length")
+    if unanswered and required_empty:
+        screenshot(page, f"{job_id}_ext_unanswered")
+        record_manual(job_id, title, company, form_url, "unanswered: " + " | ".join(unanswered)[:300])
+        return "external_unanswered"
+
+    submit = form.locator("button[type='submit']:visible, input[type='submit']:visible")
+    if not submit.count():
+        submit = form.get_by_role("button", name=SUBMIT_RE)
+    if not submit.count():
+        screenshot(page, f"{job_id}_ext_nosubmit")
+        record_manual(job_id, title, company, form_url, "no_submit_button")
+        return "external_manual"
+    if DRY_RUN:
+        screenshot(page, f"{job_id}_ext_dryrun")
+        return "dry_run"
+
+    submit.last.click()
+    for _ in range(25):
+        time.sleep(1)
+        if page.locator("[aria-invalid='true']:visible, [class*='error' i]:visible:has-text('required')").count():
+            screenshot(page, f"{job_id}_ext_invalid")
+            record_manual(job_id, title, company, form_url, "form_errors_after_submit")
+            return "external_unanswered"
+        if DONE_RE.search(page.locator("body").inner_text()) or re.search(r"confirm|thank|success", page.url):
+            return "applied_external"
+        if page.locator(CAPTCHA_SEL).count():
+            break
+    screenshot(page, f"{job_id}_ext_unconfirmed")
+    record_manual(job_id, title, company, form_url, "submitted_unconfirmed_or_captcha")
+    return "external_unconfirmed"
+
+
 # ---------------------------------------------------------------- search
 
 def search_url(keyword: str, location: str) -> str:
@@ -388,10 +707,11 @@ def search_url(keyword: str, location: str) -> str:
     params = {
         "keywords": keyword,
         "location": location,
-        "f_AL": "true",  # sadece Easy Apply
         "f_TPR": f"r{s['posted_within_hours'] * 3600}",
         "sortBy": "DD",
     }
+    if not EXTERNAL:
+        params["f_AL"] = "true"  # sadece Easy Apply
     if s.get("remote_only"):
         params["f_WT"] = "2"
     if s.get("experience_levels"):
@@ -502,11 +822,13 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             return False
         log(f"> {title} @ {company}")
         status = apply_to_job(page, job_id)
+        if status == "no_easy_apply" and EXTERNAL:
+            status = apply_external(page, job_id, title, company)
         log(f"  = {status}")
         if status != "dry_run":
             record(applied, job_id, title, company, status)
         pause(4, 9)
-        return status in ("applied", "dry_run")
+        return status in ("applied", "applied_external", "dry_run")
     except Exception as e:
         if "TOO_MANY_REDIRECTS" in str(e):
             raise SessionLost() from None
