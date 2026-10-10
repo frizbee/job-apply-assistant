@@ -22,6 +22,7 @@ import cv_profile
 
 TOKEN = secrets.token_urlsafe(16)
 STATE = {"running": False, "analyzing": False}
+REQUIRED = ["first_name", "last_name", "email", "phone_intl", "city", "country"]  # formlar bunları hep soruyor
 SOURCE_NAMES = ["linkedin", "wellfound", "indeed", "remoteok", "himalayas", "weworkremotely"]
 
 
@@ -103,6 +104,9 @@ def start(body: dict) -> dict:
     prof = {**(s.get("cv_profile") or {"title_keywords": [], "skills": [], "cover_letter": ""}), **body["profile"]}
     if not prof.get("job_titles"):
         return {"error": "no_titles"}
+    missing = [k for k in REQUIRED if not str(prof.get(k) or "").strip()]
+    if missing:
+        return {"error": "missing", "fields": missing}
     prof["total_years"] = int(prof.get("total_years") or 0)
     s.update(cv_profile=prof, salary=re.sub(r"\D", "", str(body["salary"])) or s["salary"],
              currency=body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD",
@@ -205,6 +209,7 @@ a.btn { display:inline-block; text-decoration:none; font-weight:600; border-radi
 .lang button { background:none; color:var(--muted); padding:4px 6px; }
 .lang button.on { color:var(--text); text-decoration: underline; }
 .hidden { display:none; }
+input.missing { border-color:#dc2626; background:#fef2f2; }
 @media (max-width: 640px) { .grid, .grid3 { grid-template-columns: 1fr; } }
 </style></head>
 <body><main>
@@ -287,7 +292,7 @@ const T = {
   err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
   change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
-  err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_already_running:"Already running." },
+  err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_missing:"Please fill in the fields marked in red. Application forms always ask for them.", err_already_running:"Already running." },
  tr: { step1:"Adım 1", cv_title:"CV'n", cv_hint:"CV'ni yükle (PDF veya Word). Ücretsiz bir yapay zeka modeli okuyup bilgilerini ve sana uygun pozisyonları çıkarır.",
   cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"Ücretsiz anahtarını al (bir kerelik, yaklaşık 1 dakika)",
   free_title:"Tamamen ücretsiz - hiçbir ücret ödemezsin.", free_text:"CV'n OpenRouter'daki ücretsiz bir yapay zeka modeliyle okunur. Uygulama sadece ücretsiz modelleri kullanır. Kredi kartı gerekmez, hiçbir şey satın almazsın.",
@@ -307,7 +312,7 @@ const T = {
   err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
-  err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_already_running:"Zaten çalışıyor." },
+  err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
 let lang = localStorage.lang || (navigator.language.startsWith("tr") ? "tr" : "en"), S = null, logFrom = 0, poll = null;
@@ -372,7 +377,9 @@ $("start").onclick = async () => {
   profile.job_titles = lines("job_titles");
   const body = { profile, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value, notice: $("notice").value, english: $("english").value,
     sources: [...document.querySelectorAll("#sources input:checked")].map(e => e.value), test_mode: $("test_mode").checked };
+  document.querySelectorAll("input.missing").forEach(e => e.classList.remove("missing"));
   const r = await api("/api/start", body);
+  if (r.error === "missing") { r.fields.forEach(f => $(f).classList.add("missing")); $(r.fields[0]).scrollIntoView({ behavior: "smooth", block: "center" }); }
   if (r.error) return err("m3", r);
   logFrom = 0; $("log").textContent = ""; watch();
 };
