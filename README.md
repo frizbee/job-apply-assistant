@@ -25,6 +25,12 @@ Başlarken terminalde şunlar sorulur (Enter = önceki cevap):
 3. **İngilizce seviyesi** – Native / Akıcı / Orta / Temel
 4. **İhbar süresi** (gün)
 
+Ardından CV Claude API ile okunur: ad, iletişim bilgileri, aranacak pozisyonlar, yetenek yılları
+ve kısa bir ön yazı çıkarılır. Ekranda gösterilir; onaylayabilir, pozisyonları veya ülkeleri
+değiştirebilirsin. Bunun için bir [Claude API anahtarı](https://console.anthropic.com) gerekir
+(`ANTHROPIC_API_KEY` ortam değişkeni ya da ilk çalıştırmada sorulur, `.env`'e kaydedilir).
+Anahtar girilmezse `config.yaml`'daki ayarlar kullanılır. Aynı CV için analiz tekrar yapılmaz.
+
 Cevaplar `data/user_settings.json`'da saklanır. Ardından Chrome penceresi açılır; ilk seferde
 LinkedIn'e normal şekilde giriş yap. Oturum `.browser-profile/` klasöründe kalır, sonraki
 çalıştırmalarda tekrar giriş gerekmez. LinkedIn dili İngilizce olsun.
