@@ -1,5 +1,7 @@
 # ---------------------------------------------------------------
 # LinkedIn Easy Apply ayarları. Her şeyi buradan değiştirebilirsin.
+# CV analizi onaylanırsa pozisyonlar, başlık filtresi, yetenek yılları ve
+# profil bilgileri CV'den gelen değerlerle değiştirilir (bu dosya değişmez).
 # ---------------------------------------------------------------
 
 search:
@@ -60,6 +62,7 @@ profile:
   current_company: ""          # dış formlarda "şu anki şirket" alanı (boşsa doldurulmaz)
   current_title: "AI Engineer"
   city: "Istanbul, Türkiye"
+  country: "Turkey"
   linkedin: "https://www.linkedin.com/in/klncgty"
   github: "https://github.com/klncgty"
   default_years: 3             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
@@ -90,7 +93,7 @@ answers:
   - match: 'country code|ülke.*kodu'
     answer: ["Turkey (+90)", "Türkiye (+90)", "+90"]
   - match: 'phone|mobile|telefon'
-    answer: "5343997582"
+    answer: "__PHONE__"
   - match: '(turkey|türkiye).*(authori[sz]ed|legally|permit|eligible)|(authori[sz]ed|legally|permit|eligible).*(turkey|türkiye)'
     answer: "Yes"
   - match: 'sponsor|visa'
@@ -126,15 +129,15 @@ answers:
   - match: 'hear about|how did you find'
     answer: ["LinkedIn"]
   - match: 'linkedin'
-    answer: "https://www.linkedin.com/in/klncgty"
+    answer: "__LINKEDIN__"
   - match: 'github|portfolio|website|personal site'
-    answer: "https://github.com/klncgty"
+    answer: "__GITHUB__"
   - match: 'country.*(located|live|reside|based)|which country|country of residence'
-    answer: ["Türkiye", "Turkey"]
+    answer: ["__COUNTRY__", "Türkiye", "Turkey"]
   - match: 'rag|retrieval|vector (db|database|store)'
     answer: "FAISS and Milvus vector stores, LangChain/LangGraph retrievers, hybrid search (BM25 + embeddings), rerankers, chunking and metadata filtering"
   - match: '\bcity\b|location|şehir|where are you (based|located)'
-    answer: "Istanbul, Türkiye"
+    answer: "__CITY__"
   - match: 'cover letter|why (are you|do you want)|interested in|additional information|anything else|tell us|about yourself|message to the hiring'
     answer: "__COVER_LETTER__"
   - match: 'privacy|consent|agree|terms|acknowledge'

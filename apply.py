@@ -9,8 +9,9 @@ Oturum .browser-profile/ içinde saklanır; ilk çalıştırmada açılan Chrome
 penceresinde LinkedIn'e bir kez giriş yapılır.
 
 Başlarken terminalden CV dosyasını, maaş beklentisini, İngilizce seviyesini ve
-ihbar süresini sorar (Enter = önceki cevap). Cevaplar data/user_settings.json'da
-saklanır. Sadece Kolay Başvuru (Easy Apply) ilanlarına başvurur.
+ihbar süresini sorar (Enter = önceki cevap). CV Claude API ile okunur; çıkan
+pozisyonlar ve bilgiler kullanıcı onayından sonra arama ve formlarda kullanılır.
+Cevaplar data/user_settings.json'da saklanır. Sadece Kolay Başvuru (Easy Apply) ilanlarına başvurur.
 
 Ortam değişkenleri:
   DRY_RUN   "true" ise formları doldurur ama son adımda göndermez
@@ -18,6 +19,7 @@ Ortam değişkenleri:
 """
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import random
@@ -156,14 +158,22 @@ def answer(question: str, numeric: bool = False) -> list[str]:
                 break
         else:
             result = [str(PROFILE["default_years"])]
-    result = [PROFILE["cover_letter"] if a == "__COVER_LETTER__" else a for a in result]
     if "__ENGLISH__" in result:
         result = ENGLISH_LEVELS[SETTINGS["english"]][1]
-    result = [SETTINGS.get(a.strip("_").lower(), a) if a in ("__SALARY__", "__NOTICE__") else a for a in result]
+    result = [v for v in map(placeholder, result) if v]
     if numeric:
         nums = [re.sub(r"[^\d.]", "", a) for a in result]
         result = [n for n in nums if n] or [str(PROFILE["default_years"])]
     return result
+
+
+def placeholder(a: str) -> str:
+    """"__SALARY__" gibi yer tutucuları başlangıç cevaplarından / profilden doldurur."""
+    m = re.fullmatch(r"__([A-Z_]+)__", a)
+    if not m:
+        return a
+    key = m.group(1).lower()
+    return str(SETTINGS.get(key) or PROFILE.get(key) or "")
 
 
 def year_range(option: str) -> tuple[float, float] | None:
@@ -904,12 +914,104 @@ def ask_settings() -> None:
             pass
         SETTINGS["english"] = eng
         SETTINGS["notice"] = re.sub(r"[^\d]", "", ask("İhbar süresi (gün)", SETTINGS["notice"])) or SETTINGS["notice"]
+        cv_setup()
         SETTINGS_FILE.parent.mkdir(exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
         print()
     PROFILE["resume_file"] = SETTINGS["resume"]
+    if SETTINGS.get("cv_profile"):
+        apply_cv_profile(SETTINGS["cv_profile"])
     log(f"CV: {Path(SETTINGS['resume']).name} | maaş: {SETTINGS['salary']} | "
         f"İngilizce: {ENGLISH_LEVELS[SETTINGS['english']][0]} | ihbar: {SETTINGS['notice']} gün")
+
+
+def api_key() -> str:
+    """ANTHROPIC_API_KEY ortamdan veya .env'den; yoksa sorulup .env'e yazılır."""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return os.environ["ANTHROPIC_API_KEY"]
+    env = ROOT / ".env"
+    if env.exists():
+        m = re.search(r"^ANTHROPIC_API_KEY=(.+)$", env.read_text(), re.M)
+        if m:
+            return m.group(1).strip().strip("'\"")
+    key = input("Claude API anahtarı (CV analizi için; boş bırakırsan config.yaml kullanılır): ").strip()
+    if key:
+        with env.open("a") as f:
+            f.write(f"ANTHROPIC_API_KEY={key}\n")
+    return key
+
+
+def show_profile(prof: dict, locations: list[str]) -> None:
+    print("\n=== CV'den çıkarılan profil ===")
+    print(f"Ad: {prof['first_name']} {prof['last_name']} | {prof['email']} | {prof['phone_intl']}")
+    print(f"Şehir: {prof['city']} | LinkedIn: {prof['linkedin'] or '-'} | GitHub: {prof['github'] or '-'}")
+    print(f"Ünvan: {prof['current_title']} | Toplam deneyim: {prof['total_years']} yıl")
+    print("Aranacak pozisyonlar:")
+    for t in prof["job_titles"]:
+        print(f"  - {t}")
+    print("Başlıkta aranacak kelimeler: " + ", ".join(prof["title_keywords"]))
+    print("Yetenek yılları: " + ", ".join(f"{x['skill']} {x['years']}y" for x in prof["skills"]))
+    print("Ülkeler: " + ", ".join(locations))
+    print(f"Ön yazı: {prof['cover_letter']}")
+
+
+def cv_setup() -> None:
+    """CV'den profil çıkarır (aynı CV için önbellekten) ve kullanıcıya onaylatır."""
+    resume = Path(SETTINGS["resume"])
+    digest = hashlib.sha256(resume.read_bytes()).hexdigest()
+    prof = SETTINGS.get("cv_profile") if SETTINGS.get("cv_hash") == digest else None
+    if not prof:
+        key = api_key()
+        if not key:
+            SETTINGS.pop("cv_profile", None)
+            return
+        print("CV analiz ediliyor...")
+        import cv_profile
+        try:
+            prof = cv_profile.extract(resume, key)
+        except Exception as e:
+            print(f"  ! CV analiz edilemedi ({e.__class__.__name__}: {str(e)[:150]}); config.yaml kullanılacak.")
+            SETTINGS.pop("cv_profile", None)
+            return
+    locations = SETTINGS.get("locations") or CFG["search"]["locations"]
+    while True:
+        show_profile(prof, locations)
+        choice = ask("Onaylıyor musun? e=evet, p=pozisyonları değiştir, u=ülkeleri değiştir, h=CV profilini kullanma", "e").lower()
+        if choice == "e":
+            SETTINGS.update(cv_profile=prof, cv_hash=digest, locations=locations)
+            return
+        if choice == "h":
+            SETTINGS.pop("cv_profile", None)
+            return
+        if choice == "p":
+            raw = input("Pozisyonlar (virgülle ayır): ")
+            prof["job_titles"] = [t.strip() for t in raw.split(",") if t.strip()] or prof["job_titles"]
+            words = {w.lower() for t in prof["job_titles"] for w in re.findall(r"[\w+#]{3,}", t)}
+            prof["title_keywords"] = sorted(set(prof["title_keywords"]) | words)
+        if choice == "u":
+            raw = input("Ülkeler/bölgeler (virgülle ayır, ör. European Union, Türkiye): ")
+            locations = [t.strip() for t in raw.split(",") if t.strip()] or locations
+
+
+def apply_cv_profile(prof: dict) -> None:
+    """Onaylanan CV profilini arama ayarlarına, filtrelere ve form cevaplarına uygular."""
+    for k in ("first_name", "last_name", "email", "phone_intl", "city", "country", "current_title", "cover_letter"):
+        if prof.get(k):
+            PROFILE[k] = prof[k]
+    # Linkler CV'de yoksa config'deki başkasının linki kullanılmasın
+    PROFILE.update(linkedin=prof["linkedin"], github=prof["github"], current_company="")
+    PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}"
+    if prof.get("phone_intl"):
+        # Ülke kodu ayrı sorulduğu için yerel numara: "+90 534 ..." -> "534..."
+        PROFILE["phone"] = re.sub(r"\D", "", re.sub(r"^\+\d{1,3}[\s-]", "", prof["phone_intl"]))
+    years = prof["total_years"]
+    PROFILE["default_years"] = max(1, min(years, 3))
+    search = CFG["search"]
+    search["keywords"] = prof["job_titles"]
+    search["locations"] = SETTINGS.get("locations") or search["locations"]
+    search["experience_levels"] = [1, 2] if years < 2 else [2, 3, 4] if years < 6 else [3, 4, 5]
+    CFG["filters"]["title_include"] = ["|".join(re.escape(w.lower()) for w in prof["title_keywords"])]
+    CFG["skill_years"] = {re.escape(x["skill"].lower()): x["years"] for x in prof["skills"]}
 
 
 # ---------------------------------------------------------------- main
