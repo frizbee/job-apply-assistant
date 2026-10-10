@@ -27,7 +27,10 @@ Not sure which Mac you have?  → Apple menu  → **About This Mac** → look at
 - **Windows:** Right-click the zip → **Extract All**. Open the folder and double-click **AutoApply.exe**.
   If a blue "Windows protected your PC" box appears, click **More info → Run anyway**.
 - **Mac:** Double-click the zip, then drag **AutoApply** into your **Applications** folder and open it.
-  If it says *"cannot be opened"*: open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
+  If you see *"Apple could not verify "AutoApply" is free of malware..."*:
+  1. Click **Done** (not "Move to Trash").
+  2. Open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to "AutoApply was blocked". Enter your Mac password.
+  3. Open AutoApply again and click **Open**.
 
 You only need to do this once. The app is free and not signed, so your computer warns you the first time.
 
