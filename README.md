@@ -35,13 +35,23 @@ You only need to do this once. The app is free and not signed, so your computer 
 
 A page opens in your browser:
 1. **Your CV:** choose your CV (PDF or Word) and click **Read my CV**.
-   The first time, the app asks for a free OpenRouter key and shows how to get one (about 1 minute).
+   The first time, the app asks for a free key (see below).
 2. **Check your details:** fix anything wrong and set your salary and English level.
 3. **Start applying.** Leave **Test mode** on for your first try: it fills forms but does not send them.
 
 A Chrome window opens. The first time, **log in to LinkedIn** (and Indeed / Wellfound) in that window. If you see a "verify you are human" box, tick it. The app waits for you and remembers your login.
 
 > You need **Google Chrome** installed: [google.com/chrome](https://www.google.com/chrome)
+
+### Your free key (one time, about 1 minute)
+
+The app reads your CV with a **free** AI model. You will **not pay anything**, and no credit card is needed.
+
+1. In the app, click **Open OpenRouter** (or go to [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)) and sign in (Google sign-in works).
+2. Click **Create**, type any name, leave the other fields as they are, and create the key.
+3. Copy the key (it starts with `sk-or-v1-`), paste it into the box in the app and click **Read my CV**.
+
+The app remembers it. To use a different key later, click **Change key** in step 1.
 
 **Results:** click **Open results folder**.
 - `applications.csv` lists every job it applied to.

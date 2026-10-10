@@ -212,7 +212,8 @@ a.btn { display:inline-block; text-decoration:none; font-weight:600; border-radi
     <div class="row" style="margin-top:6px"><a class="btn secondary" href="https://openrouter.ai/settings/keys" target="_blank" data-t="key_open"></a></div>
     <input type="password" id="key" placeholder="sk-or-v1-..." style="margin-top:10px">
   </div>
-  <div class="row"><button id="analyze" data-t="analyze"></button><button class="secondary" id="manual" data-t="manual"></button></div>
+  <div class="row"><button id="analyze" data-t="analyze"></button><button class="secondary" id="manual" data-t="manual"></button>
+    <button class="secondary hidden" id="changekey" data-t="change_key"></button></div>
   <div class="msg" id="m1"></div>
 </section>
 
@@ -271,7 +272,7 @@ const T = {
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
   err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.", err_pdf_docx_only:"Only .pdf or .docx files.",
-  quit:"Quit", quit_done:"The app is closed. You can close this tab.",
+  change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_already_running:"Already running." },
  tr: { step1:"Adım 1", cv_title:"CV'n", cv_hint:"CV'ni yükle (PDF veya Word). Ücretsiz bir yapay zeka modeli okuyup bilgilerini ve sana uygun pozisyonları çıkarır.",
@@ -289,7 +290,7 @@ const T = {
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
   err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
-  quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
+  change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_already_running:"Zaten çalışıyor." },
 };
@@ -320,6 +321,7 @@ async function load() {
   S = await api("/api/state");
   if (S.cv_name) { $("cvname").textContent = S.cv_name; $("drop").classList.add("has"); }
   $("keybox").classList.toggle("hidden", S.has_key);
+  $("changekey").classList.toggle("hidden", !S.has_key);
   const st = S.settings; render();
   $("english").value = st.english || "3"; $("salary").value = st.salary || ""; $("notice").value = st.notice || "";
   $("locations").value = (st.locations || S.default_locations).join("\n");
@@ -344,8 +346,9 @@ $("analyze").onclick = async () => {
   const r = await api("/api/analyze", { key: $("key").value });
   $("analyze").disabled = false;
   if (r.error) { err("m1", r); if (r.error === "analyze_failed") fill(null); return; }
-  $("keybox").classList.add("hidden"); msg("m1", t("analyzed"), "ok"); fill(r.profile); $("s2").scrollIntoView({ behavior: "smooth" });
+  $("keybox").classList.add("hidden"); $("changekey").classList.remove("hidden"); $("key").value = ""; msg("m1", t("analyzed"), "ok"); fill(r.profile); $("s2").scrollIntoView({ behavior: "smooth" });
 };
+$("changekey").onclick = () => { $("keybox").classList.remove("hidden"); $("changekey").classList.add("hidden"); $("key").focus(); };
 $("manual").onclick = () => { fill(S.profile); $("s2").scrollIntoView({ behavior: "smooth" }); };
 const lines = id => $(id).value.split("\n").map(s => s.trim()).filter(Boolean);
 $("start").onclick = async () => {
