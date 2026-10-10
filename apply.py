@@ -8,6 +8,10 @@ böylece aynı ilana iki kez başvurulmaz.
 Oturum .browser-profile/ içinde saklanır; ilk çalıştırmada açılan Chrome
 penceresinde LinkedIn'e bir kez giriş yapılır.
 
+Başlarken terminalden CV dosyasını, maaş beklentisini, İngilizce seviyesini ve
+ihbar süresini sorar (Enter = önceki cevap). Cevaplar data/user_settings.json'da
+saklanır. Sadece Kolay Başvuru (Easy Apply) ilanlarına başvurur.
+
 Ortam değişkenleri:
   DRY_RUN   "true" ise formları doldurur ama son adımda göndermez
   HEADLESS  "true" ise pencere açmadan çalışır
@@ -39,6 +43,16 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
 PROFILE = CFG["profile"]
 EXTERNAL = CFG.get("external", {}).get("enabled", False)
+SETTINGS_FILE = ROOT / "data" / "user_settings.json"
+SETTINGS: dict = {}
+
+# İngilizce seviyesi -> formlardaki seçeneklerde sırayla denenecek cevaplar
+ENGLISH_LEVELS = {
+    "1": ("Native / iki dilli", ["Native or bilingual", "Native", "Bilingual", "Fluent", "C2", "Yes"]),
+    "2": ("Akıcı / profesyonel", ["Full professional", "Professional working", "Fluent", "Advanced", "C1", "Yes"]),
+    "3": ("Orta / konuşma", ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany", "Yes"]),
+    "4": ("Temel", ["Elementary", "Basic", "Beginner", "A2", "No"]),
+}
 
 EASY_APPLY_RE = re.compile(r"easy apply|kolay başvuru", re.I)
 PLACEHOLDER_RE = re.compile(r"select an option|seçenek belirleyin|seçin|seçiniz|wybierz|bitte wählen|choose an option", re.I)
@@ -143,6 +157,9 @@ def answer(question: str, numeric: bool = False) -> list[str]:
         else:
             result = [str(PROFILE["default_years"])]
     result = [PROFILE["cover_letter"] if a == "__COVER_LETTER__" else a for a in result]
+    if "__ENGLISH__" in result:
+        result = ENGLISH_LEVELS[SETTINGS["english"]][1]
+    result = [SETTINGS.get(a.strip("_").lower(), a) if a in ("__SALARY__", "__NOTICE__") else a for a in result]
     if numeric:
         nums = [re.sub(r"[^\d.]", "", a) for a in result]
         result = [n for n in nums if n] or [str(PROFILE["default_years"])]
@@ -515,10 +532,9 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     log(f"    ! CV yüklenemedi: {e.__class__.__name__}")
         return unanswered
 
-    # CV: sadece hiç kayıtlı CV yoksa yükle
+    # CV: başta seçilen dosya LinkedIn'de listede yoksa yükle (yüklenen otomatik seçilir)
     if resume.exists() and modal.locator("input[type='file']").count():
-        has_doc = re.search(r"\.pdf|\.docx?", modal.inner_text(), re.I)
-        if not has_doc:
+        if resume.name.lower() not in modal.inner_text().lower():
             try:
                 modal.locator("input[type='file']").first.set_input_files(str(resume))
                 pause(2, 3)
@@ -851,6 +867,51 @@ def job_ok(title: str, company: str, description: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------- başlangıç soruları
+
+def ask(prompt: str, default: str) -> str:
+    raw = input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
+    return raw or default
+
+
+def ask_settings() -> None:
+    """CV, maaş ve İngilizce bilgisini kullanıcıdan alır; cevaplar bir sonraki sefere varsayılan olur."""
+    saved = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    SETTINGS.update({
+        "resume": PROFILE["resume_file"], "salary": "75000", "english": "3", "notice": "14", **saved,
+    })
+    if not sys.stdin.isatty():
+        log("Terminal yok, kayıtlı ayarlar kullanılıyor.")
+    else:
+        print("\n=== Başvuru bilgileri (Enter = köşeli parantezdeki değer) ===")
+        while True:
+            raw = ask("CV dosyası (PDF/DOCX yolu, dosyayı terminale sürükleyebilirsin)", SETTINGS["resume"])
+            path = Path(raw.strip("'\" ").replace("\\ ", " ")).expanduser()
+            path = path if path.is_absolute() else ROOT / path
+            if path.is_file() and path.suffix.lower() in (".pdf", ".doc", ".docx"):
+                SETTINGS["resume"] = str(path)
+                break
+            print(f"  ! Dosya bulunamadı veya PDF/DOCX değil: {path}")
+        while True:
+            salary = re.sub(r"[^\d]", "", ask("Yıllık maaş beklentisi (USD/EUR, sadece sayı)", SETTINGS["salary"]))
+            if salary:
+                SETTINGS["salary"] = salary
+                break
+        print("İngilizce seviyesi:")
+        for key, (label, _) in ENGLISH_LEVELS.items():
+            print(f"  {key}) {label}")
+        while (eng := ask("Seçim", SETTINGS["english"])) not in ENGLISH_LEVELS:
+            pass
+        SETTINGS["english"] = eng
+        SETTINGS["notice"] = re.sub(r"[^\d]", "", ask("İhbar süresi (gün)", SETTINGS["notice"])) or SETTINGS["notice"]
+        SETTINGS_FILE.parent.mkdir(exist_ok=True)
+        SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
+        print()
+    PROFILE["resume_file"] = SETTINGS["resume"]
+    log(f"CV: {Path(SETTINGS['resume']).name} | maaş: {SETTINGS['salary']} | "
+        f"İngilizce: {ENGLISH_LEVELS[SETTINGS['english']][0]} | ihbar: {SETTINGS['notice']} gün")
+
+
 # ---------------------------------------------------------------- main
 
 def process_job(page: Page, applied: dict, job_id: str) -> bool:
@@ -886,6 +947,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
 
 
 def main() -> int:
+    ask_settings()
     applied = load_applied()
     log(f"Başlıyor (DRY_RUN={DRY_RUN}), daha önce işlenen ilan: {len(applied)}")
     count = 0

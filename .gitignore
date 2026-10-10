@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 .env
 .browser-profile/
+data/user_settings.json

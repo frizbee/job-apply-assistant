@@ -41,10 +41,10 @@ filters:
     - 'us citizens? only'
   exclude_companies: []
 
-# Kolay Başvuru olmayan ilanlar: şirket sitesindeki formu doldurur.
-# Greenhouse, Lever ve Ashby desteklenir; diğerleri data/manual_apply.csv'ye yazılır.
+# Sadece Kolay Başvuru (Easy Apply). Şirket sitelerine doğrudan girmek spam olarak
+# algılanıyor; true yapılırsa Greenhouse/Lever/Ashby formları da doldurulur.
 external:
-  enabled: true
+  enabled: false
 
 limits:
   max_applications_per_run: 25
@@ -64,7 +64,7 @@ profile:
   github: "https://github.com/klncgty"
   default_years: 3             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
   default_yes_no: "Yes"        # eşleşen kural yoksa Evet/Hayır sorusuna cevap
-  resume_file: "Cagatay_Kilinc_CV_AI_2026.pdf"    # sadece LinkedIn'de kayıtlı CV yoksa yüklenir
+  resume_file: "Cagatay_Kilinc_CV_AI_2026.pdf"    # ilk çalıştırmada varsayılan; başlangıçta sorulur
   cover_letter: >-
     Hi, I'm an AI/ML Engineer with 10+ years of Python and 4 years building
     production RAG and agentic systems (LangGraph, LangChain, FAISS/Milvus,
@@ -106,15 +106,15 @@ answers:
   - match: 'commut|on-?site|in the office|hybrid'
     answer: "No"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
-    answer: ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany", "Yes"]  # konuşma seviyesi
+    answer: "__ENGLISH__"      # başlangıçta sorulan seviye
   - match: 'turkish|turecki|türkisch|türkçe'
     answer: ["Native", "Ojczysty", "Muttersprache", "Yes"]
   - match: 'studying|student|enrolled|öğrenci'
     answer: "No"
   - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
-    answer: "75000"            # yıllık USD/EUR beklenti
+    answer: "__SALARY__"       # başlangıçta sorulan yıllık beklenti
   - match: 'notice period|ihbar'
-    answer: "14"
+    answer: "__NOTICE__"
   - match: 'start date|availab\w* to start|when can you start|start a new role'
     answer: ["Immediately", "2 weeks"]
   - match: "bachelor|degree|lisans"
