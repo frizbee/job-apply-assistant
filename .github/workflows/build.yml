@@ -1,6 +1,4 @@
 # Builds the downloadable apps. Runs when a version tag (v1.0.0) is pushed, or by hand from the Actions tab.
-# Optional secret OPENROUTER_APP_KEY: an OpenRouter key with a $0 credit limit (free models only),
-# embedded so users don't need their own. Without it the app asks the user for a free key.
 name: Build apps
 
 on:
@@ -31,12 +29,6 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -r requirements.txt pyinstaller==6.16.0
-      - name: Embed free-model key
-        shell: bash
-        env:
-          KEY: ${{ secrets.OPENROUTER_APP_KEY }}
-        run: |
-          if [ -n "$KEY" ]; then printf 'KEY = "%s"\n' "$KEY" > _bundled_key.py; fi
       - name: Build
         shell: bash
         run: |

@@ -3,7 +3,6 @@ __pycache__/
 .venv/
 .env
 .browser-profile/
-_bundled_key.py
 build/
 dist/
 *.spec

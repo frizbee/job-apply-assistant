@@ -63,6 +63,10 @@ def save_cv(body: dict) -> dict:
 
 def analyze(body: dict) -> dict:
     if body.get("key"):
+        try:
+            cv_profile.request("/key", body["key"].strip())
+        except Exception:
+            return {"error": "bad_key"}
         apply.save_key(body["key"].strip())
     key = apply.find_key()
     if not key:
@@ -186,6 +190,9 @@ button:disabled { opacity:.5; cursor:default; }
 .msg.err { color:#b91c1c; } .msg.ok { color:var(--ok); }
 #log { background:#0f172a; color:#e2e8f0; font:12.5px/1.45 ui-monospace, Menlo, Consolas, monospace; border-radius:8px; padding:12px; height:340px; overflow:auto; white-space:pre-wrap; }
 .notice { background:#fffbeb; border:1px solid #fde68a; color:#78350f; border-radius:8px; padding:10px 12px; margin-top:12px; font-size:14px; }
+.notice.free { background:#f0fdf4; border-color:#bbf7d0; color:#14532d; margin:14px 0 4px; }
+ol.steps { margin:4px 0; padding-left:20px; color:var(--text); } ol.steps li { margin:3px 0; }
+a.btn { display:inline-block; text-decoration:none; font-weight:600; border-radius:8px; padding:9px 14px; background:#eef2ff; color:var(--accent); }
 .lang button { background:none; color:var(--muted); padding:4px 6px; }
 .lang button.on { color:var(--text); text-decoration: underline; }
 .hidden { display:none; }
@@ -198,7 +205,13 @@ button:disabled { opacity:.5; cursor:default; }
 <section class="card" id="s1">
   <div class="step" data-t="step1"></div><h2 data-t="cv_title"></h2><p class="hint" data-t="cv_hint"></p>
   <div class="drop" id="drop"><span id="cvname" data-t="cv_drop"></span><input type="file" id="file" accept=".pdf,.docx" class="hidden"></div>
-  <div id="keybox" class="hidden"><label data-t="key_label"></label><input type="password" id="key" placeholder="sk-or-v1-..."><p class="hint" data-t="key_hint"></p></div>
+  <div id="keybox" class="hidden">
+    <div class="notice free"><b data-t="free_title"></b><br><span data-t="free_text"></span></div>
+    <label data-t="key_label"></label>
+    <ol class="steps"><li data-t="key_s1"></li><li data-t="key_s2"></li><li data-t="key_s3"></li></ol>
+    <div class="row" style="margin-top:6px"><a class="btn secondary" href="https://openrouter.ai/settings/keys" target="_blank" data-t="key_open"></a></div>
+    <input type="password" id="key" placeholder="sk-or-v1-..." style="margin-top:10px">
+  </div>
   <div class="row"><button id="analyze" data-t="analyze"></button><button class="secondary" id="manual" data-t="manual"></button></div>
   <div class="msg" id="m1"></div>
 </section>
@@ -244,7 +257,10 @@ button:disabled { opacity:.5; cursor:default; }
 const TOKEN = "__TOKEN__";
 const T = {
  en: { step1:"Step 1", cv_title:"Your CV", cv_hint:"Upload your CV (PDF or Word). It is read by a free AI model to fill in your details and pick matching jobs.",
-  cv_drop:"Click to choose your CV (.pdf or .docx)", key_label:"OpenRouter key (free)", key_hint:"Create one for free at openrouter.ai/keys - no credit card needed. Only free models are used.",
+  cv_drop:"Click to choose your CV (.pdf or .docx)", key_label:"Get your free key (one time, about 1 minute)",
+  free_title:"100% free - you will not pay anything.", free_text:"Your CV is read by a free AI model on OpenRouter. The app only ever uses free models. No credit card needed, nothing to buy.",
+  key_s1:"Click the button below and sign in to OpenRouter (Google sign-in is fine).", key_s2:"Click \"Create\", give it any name, leave the other fields as they are, and create the key.",
+  key_s3:"Copy the key (it starts with sk-or-v1-) and paste it in the box below. Then click \"Read my CV\".", key_open:"Open OpenRouter",
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
@@ -254,12 +270,15 @@ const T = {
   test_mode:"Test mode (fill forms but do NOT send) - recommended for your first run",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
-  err_no_cv:"Please choose your CV first.", err_no_key:"Please enter an OpenRouter key, or skip and fill in your details yourself.", err_pdf_docx_only:"Only .pdf or .docx files.",
+  err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.", err_pdf_docx_only:"Only .pdf or .docx files.",
   quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_already_running:"Already running." },
  tr: { step1:"Adım 1", cv_title:"CV'n", cv_hint:"CV'ni yükle (PDF veya Word). Ücretsiz bir yapay zeka modeli okuyup bilgilerini ve sana uygun pozisyonları çıkarır.",
-  cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"OpenRouter anahtarı (ücretsiz)", key_hint:"openrouter.ai/keys adresinden ücretsiz al - kredi kartı gerekmez. Sadece ücretsiz modeller kullanılır.",
+  cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"Ücretsiz anahtarını al (bir kerelik, yaklaşık 1 dakika)",
+  free_title:"Tamamen ücretsiz - hiçbir ücret ödemezsin.", free_text:"CV'n OpenRouter'daki ücretsiz bir yapay zeka modeliyle okunur. Uygulama sadece ücretsiz modelleri kullanır. Kredi kartı gerekmez, hiçbir şey satın almazsın.",
+  key_s1:"Aşağıdaki butona tıkla ve OpenRouter'a giriş yap (Google ile giriş olur).", key_s2:"\"Create\" butonuna bas, istediğin bir isim ver, diğer alanlara dokunmadan anahtarı oluştur.",
+  key_s3:"Anahtarı kopyala (sk-or-v1- ile başlar) ve aşağıdaki kutuya yapıştır. Sonra \"CV'mi oku\" butonuna bas.", key_open:"OpenRouter'ı aç",
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
@@ -269,7 +288,7 @@ const T = {
   test_mode:"Test modu (formları doldurur ama GÖNDERMEZ) - ilk çalıştırmada önerilir",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
-  err_no_cv:"Önce CV'ni seç.", err_no_key:"OpenRouter anahtarı gir ya da geçip bilgilerini kendin doldur.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
+  err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_already_running:"Zaten çalışıyor." },

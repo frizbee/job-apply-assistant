@@ -1020,19 +1020,20 @@ def api_key() -> str:
     key = find_key()
     if key:
         return key
-    key = input("OpenRouter anahtarı (ücretsiz: openrouter.ai/keys; boş bırakırsan config.yaml kullanılır): ").strip()
+    key = input("Ücretsiz OpenRouter anahtarı (openrouter.ai/settings/keys; sadece ücretsiz modeller kullanılır, ücret ödemezsin; boş = atla): ").strip()
     if key:
         save_key(key)
     return key
 
 
 def save_key(key: str) -> None:
-    with (HOME / ".env").open("a") as f:
-        f.write(f"OPENROUTER_API_KEY={key}\n")
+    env = HOME / ".env"
+    lines = [l for l in (env.read_text().splitlines() if env.exists() else []) if not l.startswith("OPENROUTER_API_KEY=")]
+    env.write_text("\n".join(lines + [f"OPENROUTER_API_KEY={key}"]) + "\n")
 
 
 def find_key() -> str:
-    """OpenRouter anahtarı: ortam değişkeni, .env, ya da indirilen uygulamaya gömülü anahtar."""
+    """Kullanıcının kendi ücretsiz OpenRouter anahtarı: ortam değişkeni veya .env."""
     if os.getenv("OPENROUTER_API_KEY"):
         return os.environ["OPENROUTER_API_KEY"]
     env = HOME / ".env"
@@ -1040,11 +1041,7 @@ def find_key() -> str:
         m = re.search(r"^OPENROUTER_API_KEY=(.+)$", env.read_text(), re.M)
         if m:
             return m.group(1).strip().strip("'\"")
-    try:
-        from _bundled_key import KEY  # sadece derlenmiş uygulamada var (GitHub Secret'tan)
-        return KEY
-    except ImportError:
-        return ""
+    return ""
 
 
 def show_profile(prof: dict, locations: list[str]) -> None:
