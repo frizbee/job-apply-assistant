@@ -391,7 +391,10 @@ def selftest() -> None:
         ctx = apply.launch(pw)
         page = ctx.new_page()
         page.set_content("<title>selftest-ok</title>")
-        (apply.HOME / "selftest.txt").write_text(page.title())  # pencereli uygulamada konsol yok
+        title = page.title()
+        # OpenRouter'a HTTPS bağlantısı (sertifikalar pakette mi): model listesi anahtarsız açılır
+        models = cv_profile.request("/models", "")["data"]
+        (apply.HOME / "selftest.txt").write_text(f"{title} models={len(models)}")  # pencereli uygulamada konsol yok
         ctx.close()
 
 
