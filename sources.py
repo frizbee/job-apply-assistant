@@ -374,6 +374,8 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 try:
                     status = apply()
                 except Exception as e:
+                    if core.browser_closed(e):
+                        raise core.BrowserClosed() from None
                     core.log(f"  ! hata: {e.__class__.__name__}: {str(e)[:150]}")
                     core.screenshot(page, f"{job['id'].replace(':', '_')}_error")
                     status = "skipped_error"
@@ -388,5 +390,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     break
                 core.pause(4, 9)
         except Exception as e:
+            if core.browser_closed(e):
+                raise core.BrowserClosed() from None
             core.log(f"  ! {name} okunamadı: {e.__class__.__name__}: {str(e)[:150]}")
     return count

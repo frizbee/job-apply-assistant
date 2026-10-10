@@ -108,6 +108,14 @@ class Stopped(BaseException):
     """Kullanıcı durdurdu (BaseException: kaynaklardaki 'except Exception' bloklarında yutulmasın)."""
 
 
+class BrowserClosed(Stopped):
+    """Kullanıcı Chrome penceresini kapattı."""
+
+
+def browser_closed(e: BaseException) -> bool:
+    return bool(re.search(r"has been closed|Target closed|Browser closed|Connection closed", str(e)))
+
+
 class SessionLost(Exception):
     """LinkedIn oturumu sonlandırdı (çerez geçersiz)."""
 
@@ -118,6 +126,11 @@ LOG_LINES: list[str] = []  # arayüz buradan okur
 def log(msg: str) -> None:
     line = f"[{dt.datetime.now():%H:%M:%S}] {msg}"
     LOG_LINES.append(line)
+    try:
+        with (HOME / "data" / "run.log").open("a", encoding="utf-8") as f:
+            f.write(f"{dt.date.today()} {line}\n")
+    except OSError:
+        pass
     try:
         print(line, flush=True)
     except Exception:
@@ -214,6 +227,8 @@ def answer(question: str, numeric: bool = False) -> list[str]:
                 break
         else:
             result = [str(PROFILE["default_years"])]
+    if "__SALARY__" in result:
+        result = [salary_answer(q)]
     if "__ENGLISH__" in result:
         result = ENGLISH_LEVELS[SETTINGS["english"]][1]
     result = [v for v in map(placeholder, result) if v]
@@ -221,6 +236,59 @@ def answer(question: str, numeric: bool = False) -> list[str]:
         nums = [re.sub(r"[^\d.]", "", a) for a in result]
         result = [n for n in nums if n] or [str(PROFILE["default_years"])]
     return result
+
+
+CURRENCY_RE = {
+    "USD": r"\busd\b|\$|us dollars?|\bdollars?\b",
+    "EUR": r"\beur\b|€|\beuros?\b",
+    "GBP": r"\bgbp\b|£|\bpounds?\b",
+    "TRY": r"\btry\b|\btl\b|₺|lira",
+    "PLN": r"\bpln\b|zł|zloty",
+    "CHF": r"\bchf\b|swiss franc",
+    "INR": r"\binr\b|₹|rupee",
+    "CAD": r"\bcad\b|canadian dollar",
+}
+RATES: dict[str, float] = {}
+
+
+def rates() -> dict[str, float]:
+    """1 USD = ? birim. Ücretsiz kaynaklar; ulaşılamazsa boş (dönüşüm yapılmaz)."""
+    if not RATES:
+        import urllib.request
+        from cv_profile import SSL_CTX
+        for url in ("https://api.frankfurter.dev/v1/latest?base=USD", "https://open.er-api.com/v6/latest/USD"):
+            try:
+                with urllib.request.urlopen(url, timeout=15, context=SSL_CTX) as r:
+                    RATES.update(json.loads(r.read())["rates"], USD=1.0)
+                if "TRY" in RATES:
+                    break
+            except Exception:
+                continue
+    return RATES
+
+
+def salary_answer(question: str) -> str:
+    """Yıllık beklentiyi sorudaki para birimine ve döneme (aylık/saatlik/bin) çevirir."""
+    q = question.lower()
+    amount = float(SETTINGS.get("salary") or 0)
+    have = SETTINGS.get("currency", "USD")
+    # Dolar işareti CAD sorularında da geçer; önce özel kodlara bak
+    want = next((c for c in ("CAD", "TRY", "PLN", "CHF", "INR", "GBP", "EUR", "USD") if re.search(CURRENCY_RE[c], q)), have)
+    if want != have:
+        r = rates()
+        if have in r and want in r:
+            amount = amount / r[have] * r[want]
+    if re.search(r"hour|saatlik|stündlich|\brate\b", q):
+        amount, step = amount / 2080, 1
+    elif re.search(r"\bday\b|daily|günlük", q):
+        amount, step = amount / 220, 5
+    elif re.search(r"month|aylık|monat|mensuel", q):
+        amount, step = amount / 12, 100
+    else:
+        step = 1000
+    if re.search(r"in thousands|\(k\)|thousands of|bin (tl|usd|eur)", q):
+        amount, step = amount / 1000, 1
+    return str(int(max(step, round(amount / step) * step)))
 
 
 def placeholder(a: str) -> str:
@@ -517,6 +585,8 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     )
     for el in fields.all():
         try:
+            if not el.is_editable(timeout=2000):
+                continue
             invalid = el.get_attribute("aria-invalid") == "true"
             if el.input_value().strip() and not invalid:
                 continue
@@ -554,7 +624,13 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             if sugg.count():
                 sugg.click()
         except Exception as e:
-            log(f"    ! alan doldurulamadı: {e.__class__.__name__}")
+            if browser_closed(e):
+                raise BrowserClosed() from None
+            try:
+                q = question_of(el)[:70]
+            except Exception:
+                q = "?"
+            log(f"    ! alan doldurulamadı, atlandı ({e.__class__.__name__}): {q}")
 
     # Açılır listeler
     for sel in modal.locator("select:visible").all():
@@ -891,6 +967,8 @@ def open_list(page: Page, url: str) -> list[str] | None:
     except Exception as e:
         if "TOO_MANY_REDIRECTS" in str(e):
             raise SessionLost() from None
+        if browser_closed(e):
+            raise BrowserClosed() from None
         log(f"  ! sayfa açılamadı: {str(e)[:100]}")
         return None
     pause(3, 5)
@@ -952,6 +1030,8 @@ def job_ok(title: str, company: str, description: str) -> str | None:
     t, d = title.lower(), description.lower()
     if not any(re.search(p, t) for p in f["title_include"]):
         return "title_not_relevant"
+    if not all(re.search(p, t) for p in f.get("title_require", [])):
+        return "title_not_relevant"
     if any(re.search(p, t) for p in f["title_exclude"]):
         return "title_excluded"
     if any(re.search(p, d) for p in f.get("description_exclude", [])):
@@ -983,8 +1063,11 @@ def ask_settings() -> None:
                 SETTINGS["resume"] = str(path)
                 break
             print(f"  ! Dosya bulunamadı veya PDF/DOCX değil: {path}")
+        while (cur := ask("Maaş para birimi (USD/EUR/GBP/TRY)", SETTINGS.get("currency", "USD")).upper()) not in CURRENCY_RE:
+            pass
+        SETTINGS["currency"] = cur
         while True:
-            salary = re.sub(r"[^\d]", "", ask("Yıllık maaş beklentisi (USD/EUR, sadece sayı)", SETTINGS["salary"]))
+            salary = re.sub(r"[^\d]", "", ask(f"Yıllık maaş beklentisi ({cur}, sadece sayı)", SETTINGS["salary"]))
             if salary:
                 SETTINGS["salary"] = salary
                 break
@@ -1002,7 +1085,7 @@ def ask_settings() -> None:
 
 def load_settings() -> dict:
     saved = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
-    SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "english": "3", "notice": "14", **saved})
+    SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "currency": "USD", "english": "3", "notice": "14", **saved})
     return SETTINGS
 
 
@@ -1121,6 +1204,10 @@ def apply_cv_profile(prof: dict) -> None:
     words = {w for t in prof["job_titles"] for w in re.findall(r"[\w+#]+", t.lower()) if len(w) > 1}
     words |= {w.lower() for w in prof["title_keywords"]}
     CFG["filters"]["title_include"] = ["|".join(rf"\b{re.escape(w)}\b" for w in sorted(words))]
+    # "AI Search uzmanı" gibi alakasız ilanlar elensin: başlıkta pozisyonun rol kelimesi de olmalı
+    roles = {re.findall(r"[\w+#]+", t.lower())[-1] for t in prof["job_titles"] if re.findall(r"[\w+#]+", t)}
+    roles |= {"engineer", "developer", "scientist", "analyst", "architect", "researcher", "specialist", "lead"} & words
+    CFG["filters"]["title_require"] = ["|".join(rf"\b{re.escape(w)}" for w in sorted(roles))] if roles else []
     country = (PROFILE.get("country") or "").strip().lower()
     if country:
         names = "turkey|türkiye|turkiye" if country in ("turkey", "türkiye") else re.escape(country)
@@ -1159,6 +1246,8 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
     except Exception as e:
         if "TOO_MANY_REDIRECTS" in str(e):
             raise SessionLost() from None
+        if browser_closed(e):
+            raise BrowserClosed() from None
         log(f"  ! hata {job_id}: {e.__class__.__name__}: {str(e)[:150]}")
         screenshot(page, f"{job_id}_error")
         try:
@@ -1233,13 +1322,17 @@ def run_bot() -> int:
     count = 0
     with sync_playwright() as pw:
         ctx = launch(pw)
+        # Alan tıklama/doldurma 6 sn'de vazgeçsin (takılı kalmasın); sayfa yükleme 30 sn
+        ctx.set_default_timeout(6000)
+        ctx.set_default_navigation_timeout(30000)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.set_default_timeout(15000)
         try:
             if CFG["sources"].get("linkedin", True):
                 count = run_linkedin(page, applied, count)
             import sources
             count = sources.run(sys.modules[__name__], page, applied, count)
+        except BrowserClosed:
+            log("Chrome penceresi kapatıldı, durduruldu. Kalan ilanlar bir sonraki çalıştırmada denenir.")
         except Stopped:
             log("Durduruldu.")
         finally:

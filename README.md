@@ -59,6 +59,7 @@ The app remembers it. To use a different key later, click **Change key** in step
 **Results:** click **Open results folder**.
 - `applications.csv` lists every job it applied to.
 - `manual_apply.csv` lists jobs you need to apply to yourself.
+- `run.log` is a detailed log. If something goes wrong, send this file when you report it.
 
 ---
 
@@ -66,6 +67,7 @@ The app remembers it. To use a different key later, click **Change key** in step
 
 - Only remote jobs posted in the last 7 days are considered. The same job is never applied to twice, even if it appears on several sites.
 - Company websites are visited only a few times per run, slowly, so you don't get flagged as spam.
+- Salary questions are answered in the currency and period the form asks for (e.g. monthly in EUR), converted from your yearly amount using daily exchange rates.
 - **It costs nothing.** Your CV is read by a free AI model on [OpenRouter](https://openrouter.ai). The app only uses free models, so you never pay. No credit card is needed. Your data stays on your computer except for that one request.
 - Your files are stored in the **AutoApply** folder in your home folder.
 - Automating applications is against some sites' terms of service. Use it at your own risk and keep the numbers low.
