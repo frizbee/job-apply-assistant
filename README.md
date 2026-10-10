@@ -52,7 +52,7 @@ The app reads your CV with a **free** AI model. You will **not pay anything**, a
 
 1. In the app, click **Open OpenRouter** (or go to [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)) and sign in (Google sign-in works).
 2. Click **Create**, type any name, leave the other fields as they are, and create the key.
-3. Copy the key (it starts with `sk-or-v1-`), paste it into the box in the app and click **Read my CV**.
+3. Click **Copy** in the window that shows your new key (it's shown only once; the shortened key in the list won't work), paste it into the app and click **Read my CV**.
 
 The app remembers it. To use a different key later, click **Change key** in step 1.
 

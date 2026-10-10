@@ -62,9 +62,13 @@ def save_cv(body: dict) -> dict:
 
 
 def analyze(body: dict) -> dict:
-    if body.get("key"):
+    key = re.sub(r"[\s\u200b-\u200d\ufeff]", "", body.get("key") or "")  # kopyalamada gelen boşluk/görünmez karakterler
+    if key:
+        if not re.fullmatch(r"sk-or-[A-Za-z0-9_-]{20,}", key):
+            return {"error": "short_key"}  # listedeki kısaltılmış "sk-or-v1-abc...123" kopyalanmış
+        body["key"] = key
         try:
-            cv_profile.request("/key", body["key"].strip())
+            cv_profile.request("/key", key)
         except cv_profile.urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 return {"error": "bad_key"}
@@ -265,7 +269,7 @@ const T = {
   cv_drop:"Click to choose your CV (.pdf or .docx)", key_label:"Get your free key (one time, about 1 minute)",
   free_title:"100% free - you will not pay anything.", free_text:"Your CV is read by a free AI model on OpenRouter. The app only ever uses free models. No credit card needed, nothing to buy.",
   key_s1:"Click the button below and sign in to OpenRouter (Google sign-in is fine).", key_s2:"Click \"Create\", give it any name, leave the other fields as they are, and create the key.",
-  key_s3:"Copy the key (it starts with sk-or-v1-) and paste it in the box below. Then click \"Read my CV\".", key_open:"Open OpenRouter",
+  key_s3:"Click \"Copy\" in the window that shows your new key (it is shown only once) and paste it below. Then click \"Read my CV\".", key_open:"Open OpenRouter",
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
@@ -275,7 +279,8 @@ const T = {
   test_mode:"Test mode (fill forms but do NOT send) - recommended for your first run",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
-  err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.", err_pdf_docx_only:"Only .pdf or .docx files.",
+  err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.",
+  err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
   change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_already_running:"Already running." },
@@ -283,7 +288,7 @@ const T = {
   cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"Ücretsiz anahtarını al (bir kerelik, yaklaşık 1 dakika)",
   free_title:"Tamamen ücretsiz - hiçbir ücret ödemezsin.", free_text:"CV'n OpenRouter'daki ücretsiz bir yapay zeka modeliyle okunur. Uygulama sadece ücretsiz modelleri kullanır. Kredi kartı gerekmez, hiçbir şey satın almazsın.",
   key_s1:"Aşağıdaki butona tıkla ve OpenRouter'a giriş yap (Google ile giriş olur).", key_s2:"\"Create\" butonuna bas, istediğin bir isim ver, diğer alanlara dokunmadan anahtarı oluştur.",
-  key_s3:"Anahtarı kopyala (sk-or-v1- ile başlar) ve aşağıdaki kutuya yapıştır. Sonra \"CV'mi oku\" butonuna bas.", key_open:"OpenRouter'ı aç",
+  key_s3:"Yeni anahtarın gösterildiği penceredeki \"Copy\" butonuna bas (sadece bir kez gösterilir) ve aşağıya yapıştır. Sonra \"CV'mi oku\" butonuna bas.", key_open:"OpenRouter'ı aç",
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
@@ -293,7 +298,8 @@ const T = {
   test_mode:"Test modu (formları doldurur ama GÖNDERMEZ) - ilk çalıştırmada önerilir",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
-  err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
+  err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.",
+  err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_already_running:"Zaten çalışıyor." },
