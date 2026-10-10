@@ -27,7 +27,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import yaml
 from playwright.sync_api import Locator, Page, sync_playwright
@@ -92,7 +92,7 @@ QUESTION_JS = r"""el => {
 
 
 # Bu durumlarla kaydedilen ilanlar sonraki çalıştırmada tekrar denenir
-RETRY_PREFIXES = ("skipped_", "modal_not_opened") + (("no_easy_apply",) if EXTERNAL else ())
+RETRY_PREFIXES = ("skipped_", "modal_not_opened", "blocked") + (("no_easy_apply",) if EXTERNAL else ())
 
 
 class LimitReached(Exception):
@@ -120,8 +120,18 @@ def load_applied() -> dict:
         return {}
 
 
-def record(applied: dict, job_id: str, title: str, company: str, status: str) -> None:
-    applied[job_id] = {"status": status, "date": dt.date.today().isoformat()}
+def job_key(title: str, company: str) -> str:
+    """Aynı ilan farklı sitelerde çıkınca tanımak için şirket+başlık anahtarı."""
+    return re.sub(r"\W+", "", f"{company}|{title}".lower())
+
+
+def applied_elsewhere(applied: dict, title: str, company: str) -> bool:
+    key = job_key(title, company)
+    return any(v.get("key") == key and v["status"].startswith("applied") for v in applied.values())
+
+
+def record(applied: dict, job_id: str, title: str, company: str, status: str, url: str = "") -> None:
+    applied[job_id] = {"status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company)}
     APPLIED_FILE.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
     new_file = not LOG_FILE.exists()
     with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
@@ -129,7 +139,35 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str) ->
         if new_file:
             w.writerow(["date", "job_id", "title", "company", "status", "url"])
         w.writerow([dt.datetime.now().isoformat(timespec="minutes"), job_id, title, company,
-                    status, f"https://www.linkedin.com/jobs/view/{job_id}/"])
+                    status, url or f"https://www.linkedin.com/jobs/view/{job_id}/"])
+
+
+BLOCKED_RE = re.compile(r"just a moment|attention required|additional verification|security check|"
+                        r"humans only|verify you are human|are you a robot|captcha", re.I)
+
+
+def blocked(page: Page) -> bool:
+    try:
+        return bool(BLOCKED_RE.search(page.title()) or BLOCKED_RE.search(page.locator("body").inner_text()[:1500]))
+    except Exception:
+        return False
+
+
+def wait_human(page: Page, check, what: str, minutes: int = 5) -> bool:
+    """check(page) True olana kadar kullanıcının pencerede doğrulama/giriş yapmasını bekler."""
+    if check(page):
+        return True
+    if os.getenv("HEADLESS", "false").lower() == "true":
+        return False
+    log(f"  !! Açık Chrome penceresinde {what} (en fazla {minutes} dk bekleniyor)...")
+    end = time.time() + minutes * 60
+    while time.time() < end:
+        time.sleep(3)
+        if check(page):
+            pause(2, 3)
+            return True
+    log(f"  !! {what} yapılmadı, bu kaynak atlanıyor.")
+    return False
 
 
 def screenshot(page: Page, name: str) -> None:
@@ -658,14 +696,22 @@ def record_manual(job_id: str, title: str, company: str, url: str, reason: str) 
 def external_url(page: Page) -> str | None:
     """LinkedIn'deki 'Başvur' butonuna basıp şirket sitesinin adresini döndürür."""
     btn = page.get_by_role("button", name=APPLY_BTN_RE).or_(page.get_by_role("link", name=APPLY_BTN_RE))
-    btn = btn.filter(has_not_text=EASY_APPLY_RE).first
+    return follow_apply(page, btn.filter(has_not_text=EASY_APPLY_RE).first)
+
+
+def follow_apply(page: Page, btn: Locator) -> str | None:
+    """Başvur butonuna basar; açılan sekmenin ya da gidilen sayfanın adresini döndürür."""
     if not btn.count():
         return None
     ctx = page.context
-    before = len(ctx.pages)
+    before, start = len(ctx.pages), page.url
     btn.click()
     for _ in range(30):
         time.sleep(0.5)
+        if page.url != start and urlparse(page.url).netloc != urlparse(start).netloc:
+            url = page.url
+            page.go_back(wait_until="domcontentloaded")
+            return url
         if len(ctx.pages) > before:
             new = ctx.pages[-1]
             try:
@@ -712,14 +758,34 @@ def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
     return url, name
 
 
+EXT_STATE = {"count": 0, "last": 0.0}
+
+
 def apply_external(page: Page, job_id: str, title: str, company: str) -> str:
     url = external_url(page)
     if not url:
         return "no_apply_button"
+    return apply_form(page, job_id, title, company, url)
+
+
+def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> str:
+    """Şirket sitesindeki başvuru formu. Spam sayılmamak için çalıştırma başına sınırlı ve aralıklı."""
+    ext = CFG["external"]
+    if not EXTERNAL:
+        record_manual(job_id, title, company, url, "external_disabled")
+        return "external_manual"
+    if EXT_STATE["count"] >= ext.get("max_per_run", 5):
+        return "skipped_external_limit"  # sonraki çalıştırmada tekrar denenir
     form_url, ats = ats_apply_url(page, url)
     if not form_url:
         record_manual(job_id, title, company, url, "unsupported_site")
         return "external_manual"
+    wait = EXT_STATE["last"] + ext.get("min_wait_seconds", 120) - time.time()
+    if wait > 0:
+        log(f"  .. şirket formu öncesi {int(wait)} sn bekleniyor")
+        time.sleep(wait)
+    EXT_STATE["count"] += 1
+    EXT_STATE["last"] = time.time()
     log(f"  -> {ats}: {form_url[:90]}")
     page.goto(form_url, wait_until="domcontentloaded", timeout=30000)
     pause(3, 5)
@@ -1022,7 +1088,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded")
         pause(2.5, 4.5)
         title, company, desc = job_info(page)
-        reason = job_ok(title, company, desc)
+        reason = job_ok(title, company, desc) or ("applied_elsewhere" if applied_elsewhere(applied, title, company) else None)
         if reason:
             log(f"- atla [{reason}] {title} @ {company}")
             record(applied, job_id, title, company, reason)
@@ -1048,6 +1114,43 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         return False
 
 
+def linkedin_login(page: Page) -> bool:
+    page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+    pause(2, 4)
+    if re.search(r"login|checkpoint|authwall|signup|uas/", page.url) or page.url.rstrip("/") == "https://www.linkedin.com":
+        log("Giriş yok. Açılan Chrome penceresinde LinkedIn'e giriş yap (10 dk bekleniyor)...")
+        if "login" not in page.url:
+            page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+        try:
+            page.wait_for_url(re.compile(r"linkedin\.com/(feed|in/|mynetwork|jobs)"), timeout=600_000)
+        except PWTimeout:
+            log("LinkedIn'e giriş yapılmadı, diğer sitelere geçiliyor.")
+            return False
+        pause(3, 5)
+    log("LinkedIn girişi tamam.")
+    return True
+
+
+def run_linkedin(page: Page, applied: dict, count: int) -> int:
+    if not linkedin_login(page):
+        return count
+    stop = min(CFG["limits"]["max_applications_per_run"], count + CFG["limits"].get("per_source", 15))
+    try:
+        for job_ids in job_lists(page):
+            for job_id in job_ids:
+                if job_id in applied and not applied[job_id]["status"].startswith(RETRY_PREFIXES):
+                    continue
+                if count >= stop or time.time() > DEADLINE:
+                    raise LimitReached
+                if process_job(page, applied, job_id):
+                    count += 1
+    except LimitReached:
+        log("Günlük limit/süre doldu.")
+    except SessionLost:
+        log("LinkedIn oturumu kapattı. Sonraki çalıştırmada açılan pencerede giriş yap; diğer sitelere geçiliyor.")
+    return count
+
+
 def main() -> int:
     ask_settings()
     applied = load_applied()
@@ -1067,36 +1170,11 @@ def main() -> int:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(15000)
 
-        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-        pause(2, 4)
-        if re.search(r"login|checkpoint|authwall|signup|uas/", page.url) or page.url.rstrip("/") == "https://www.linkedin.com":
-            log("Giriş yok. Açılan Chrome penceresinde LinkedIn'e giriş yap (10 dk bekleniyor)...")
-            if "login" not in page.url:
-                page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-            try:
-                page.wait_for_url(re.compile(r"linkedin\.com/(feed|in/|mynetwork|jobs)"), timeout=600_000)
-            except PWTimeout:
-                log("Giriş yapılmadı, çıkılıyor.")
-                ctx.close()
-                return 1
-            pause(3, 5)
-        log("Giriş başarılı.")
+        if CFG["sources"].get("linkedin", True):
+            count = run_linkedin(page, applied, count)
 
-        try:
-            for job_ids in job_lists(page):
-                for job_id in job_ids:
-                    if job_id in applied and not applied[job_id]["status"].startswith(RETRY_PREFIXES):
-                        continue
-                    if count >= CFG["limits"]["max_applications_per_run"] or time.time() > DEADLINE:
-                        raise LimitReached
-                    if process_job(page, applied, job_id):
-                        count += 1
-        except LimitReached:
-            log("Günlük limit/süre doldu.")
-        except SessionLost:
-            log("LinkedIn oturumu kapattı. Tekrar çalıştırıp açılan pencerede giriş yap.")
-            ctx.close()
-            return 1
+        import sources
+        count = sources.run(sys.modules[__name__], page, applied, count)
 
         ctx.close()
 

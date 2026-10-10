@@ -22,6 +22,8 @@ search:
   posted_within_hours: 168     # son 1 haftada yayınlanan ilanlar
   experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
   pages_per_search: 2          # her arama için kaç sayfa (25 ilan/sayfa)
+  # Remote panolarda konum kısıtı olan ilanlar bunlardan birine uymalı (regex); ülke de kabul edilir
+  accepted_regions: 'anywhere|worldwide|global|europe|emea|\beu\b|cet|turkey|türkiye'
 
 filters:
   # Başlık bunlardan en az birine uymalı (regex, küçük harf)
@@ -43,14 +45,30 @@ filters:
     - 'us citizens? only'
   exclude_companies: []
 
-# Sadece Kolay Başvuru (Easy Apply). Şirket sitelerine doğrudan girmek spam olarak
-# algılanıyor; true yapılırsa Greenhouse/Lever/Ashby formları da doldurulur.
+# İlan kaynakları. LinkedIn/Wellfound/Indeed kendi hızlı başvurusunu kullanır (ilk seferde
+# açılan pencerede giriş yapılır). Remote OK/Himalayas/We Work Remotely ilanları şirket
+# sitesindeki forma gider (aşağıdaki external ayarları geçerli).
+sources:
+  linkedin: true
+  wellfound: true
+  indeed: true
+  indeed_domain: "www.indeed.com"
+  indeed_easy_apply_only: false   # true: sadece "Easily apply" ilanları
+  remoteok: true
+  himalayas: true
+  weworkremotely: true
+
+# Şirket sitesindeki formlar (Greenhouse, Lever, Ashby otomatik; diğerleri
+# data/manual_apply.csv'ye yazılır). Spam sayılmamak için az ve aralıklı.
 external:
-  enabled: false
+  enabled: true
+  max_per_run: 5            # çalıştırma başına en fazla şirket formu
+  min_wait_seconds: 180     # iki şirket formu arası bekleme
 
 limits:
-  max_applications_per_run: 25
-  max_runtime_minutes: 45
+  max_applications_per_run: 40   # tüm kaynaklar toplamı
+  per_source: 15                 # tek kaynaktan en fazla
+  max_runtime_minutes: 90
 
 profile:
   first_name: "Çağatay"
