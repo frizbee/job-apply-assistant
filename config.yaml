@@ -5,25 +5,19 @@
 # ---------------------------------------------------------------
 
 search:
+  # Arayüzde/CV'den gelen pozisyonlar bunun yerine kullanılır
   keywords:
-    - "AI Engineer"
-    - "Machine Learning Engineer"
-    - "LLM Engineer"
-    - "Generative AI Engineer"
-    - "AI Agent Developer"
-    - "NLP Engineer"
-    - "Data Scientist"
+    - "Software Engineer"
   locations:
     - "European Union"
     - "United Kingdom"
-    - "Türkiye"
     - "United States"
   remote_only: true            # sadece remote ilanlar (f_WT=2)
   posted_within_hours: 168     # son 1 haftada yayınlanan ilanlar
   experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
   pages_per_search: 2          # her arama için kaç sayfa (25 ilan/sayfa)
   # Remote panolarda konum kısıtı olan ilanlar bunlardan birine uymalı (regex); ülke de kabul edilir
-  accepted_regions: 'anywhere|worldwide|global|europe|emea|\beu\b|cet|turkey|türkiye'
+  accepted_regions: 'anywhere|worldwide|global|europe|emea|\beu\b|cet'
 
 filters:
   # Başlık bunlardan en az birine uymalı (regex, küçük harf)
@@ -70,50 +64,36 @@ limits:
   per_source: 15                 # tek kaynaktan en fazla
   max_runtime_minutes: 90
 
+# Kişisel bilgiler arayüzden / CV'den doldurulur; burada sadece varsayılanlar var.
 profile:
-  first_name: "Çağatay"
-  last_name: "Kılınç"
-  full_name: "Çağatay Kılınç"
-  email: "cgtyklnc@gmail.com"
-  phone: "5343997582"
-  phone_intl: "+90 534 399 75 82"
+  first_name: ""
+  last_name: ""
+  full_name: ""
+  email: ""
+  phone: ""
+  phone_intl: ""
   current_company: ""          # dış formlarda "şu anki şirket" alanı (boşsa doldurulmaz)
-  current_title: "AI Engineer"
-  city: "Istanbul, Türkiye"
-  country: "Turkey"
-  linkedin: "https://www.linkedin.com/in/klncgty"
-  github: "https://github.com/klncgty"
-  default_years: 3             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
+  current_title: ""
+  city: ""
+  country: ""
+  linkedin: ""
+  github: ""
+  default_years: 2             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
   default_yes_no: "Yes"        # eşleşen kural yoksa Evet/Hayır sorusuna cevap
-  resume_file: "Cagatay_Kilinc_CV_AI_2026.pdf"    # ilk çalıştırmada varsayılan; başlangıçta sorulur
-  cover_letter: >-
-    Hi, I'm an AI/ML Engineer with 10+ years of Python and 4 years building
-    production RAG and agentic systems (LangGraph, LangChain, FAISS/Milvus,
-    OpenAI and Claude) shipped with FastAPI on GCP/Azure. I'm the creator of the
-    open-source pdfXtractor and LeakLens. I'd be glad to bring that experience
-    to your team. Portfolio: https://github.com/klncgty
+  resume_file: ""
+  cover_letter: ""
 
-# "Kaç yıl deneyimin var?" sorularında soru metnine göre yıl (ilk eşleşen kazanır)
-skill_years:
-  'python': 10
-  'llm|langchain|langgraph|\brag\b|generative|gen ?ai|prompt|agent|openai|gpt|vector': 4
-  'machine learning|\bml\b|data scien|scikit|xgboost|pandas|sql|analytics|statistic': 6
-  'pytorch|deep learning|nlp|hugging ?face|transformer|fine.?tun': 4
-  'fastapi|flask|rest|api|backend': 5
-  'gcp|google cloud|azure|cloud': 3
-  'docker|kubernetes|mlops|ci/cd': 2
-  'react|javascript|typescript': 2
+# "Kaç yıl deneyimin var?" sorularında soru metnine göre yıl (CV'den doldurulur)
+skill_years: {}
 
 # Form soruları için kurallar. Soru metni (küçük harf) "match" regex'ine uyarsa
 # "answer" kullanılır. Liste verirsen seçenekli sorularda sırayla denenir.
 # Sıra önemli: ilk eşleşen kazanır.
 answers:
   - match: 'country code|ülke.*kodu'
-    answer: ["Turkey (+90)", "Türkiye (+90)", "+90"]
+    answer: "__COUNTRY_CODE__"   # telefondan, ör. "(+90)"
   - match: 'phone|mobile|telefon'
     answer: "__PHONE__"
-  - match: '(turkey|türkiye).*(authori[sz]ed|legally|permit|eligible)|(authori[sz]ed|legally|permit|eligible).*(turkey|türkiye)'
-    answer: "Yes"
   - match: 'sponsor|visa'
     answer: "No"               # remote çalışacağın için; onsite yurtdışı ilanlarda "Yes" olmalı
   - match: 'authori[sz]ed to work|legally (authori[sz]ed|allowed|eligible)|work permit|right to work|citizen'
@@ -122,8 +102,6 @@ answers:
     answer: "Yes"
   - match: 'relocat'
     answer: "Yes"
-  - match: '(commut|on-?site|office|hybrid).*(istanbul|i̇stanbul|sarıyer|maslak|levent|kadıköy|ataşehir|türkiye|turkey)|(istanbul|i̇stanbul|türkiye|turkey).*(commut|on-?site|office|hybrid)'
-    answer: "Yes"             # İstanbul ofisine gidebilirim
   - match: 'commut|on-?site|in the office|hybrid'
     answer: "No"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
@@ -151,9 +129,7 @@ answers:
   - match: 'github|portfolio|website|personal site'
     answer: "__GITHUB__"
   - match: 'country.*(located|live|reside|based)|which country|country of residence'
-    answer: ["__COUNTRY__", "Türkiye", "Turkey"]
-  - match: 'rag|retrieval|vector (db|database|store)'
-    answer: "FAISS and Milvus vector stores, LangChain/LangGraph retrievers, hybrid search (BM25 + embeddings), rerankers, chunking and metadata filtering"
+    answer: "__COUNTRY__"
   - match: '\bcity\b|location|şehir|where are you (based|located)'
     answer: "__CITY__"
   - match: 'cover letter|why (are you|do you want)|interested in|additional information|anything else|tell us|about yourself|message to the hiring'

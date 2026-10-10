@@ -3,4 +3,13 @@ __pycache__/
 .venv/
 .env
 .browser-profile/
-data/user_settings.json
+_bundled_key.py
+build/
+dist/
+*.spec
+# kişisel veriler
+data/
+cv/
+*.pdf
+*.docx
+config.local.yaml

@@ -25,6 +25,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -33,19 +34,23 @@ import yaml
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
-ROOT = Path(__file__).resolve().parent
-CFG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
-APPLIED_FILE = ROOT / "data" / "applied.json"
-LOG_FILE = ROOT / "data" / "applications.csv"
-LAST_RUN_FILE = ROOT / "data" / "last_run.txt"
-MANUAL_FILE = ROOT / "data" / "manual_apply.csv"
-SHOTS = ROOT / "screenshots"
-PROFILE_DIR = ROOT / ".browser-profile"
+ROOT = Path(__file__).resolve().parent  # kod ve varsayılan config.yaml
+# Kullanıcı verisi: kaynak koddan çalışırken proje klasörü, indirilen uygulamada ~/AutoApply
+HOME = Path(os.getenv("AUTOAPPLY_HOME") or (Path.home() / "AutoApply" if getattr(sys, "frozen", False) else ROOT))
+(HOME / "data").mkdir(parents=True, exist_ok=True)
+CFG = yaml.safe_load(((HOME if (HOME / "config.yaml").exists() else ROOT) / "config.yaml").read_text(encoding="utf-8"))
+APPLIED_FILE = HOME / "data" / "applied.json"
+LOG_FILE = HOME / "data" / "applications.csv"
+LAST_RUN_FILE = HOME / "data" / "last_run.txt"
+MANUAL_FILE = HOME / "data" / "manual_apply.csv"
+SHOTS = HOME / "screenshots"
+PROFILE_DIR = HOME / ".browser-profile"
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
+STOP = threading.Event()  # arayüzdeki "Durdur" butonu
 PROFILE = CFG["profile"]
 EXTERNAL = CFG.get("external", {}).get("enabled", False)
-SETTINGS_FILE = ROOT / "data" / "user_settings.json"
+SETTINGS_FILE = HOME / "data" / "user_settings.json"
 SETTINGS: dict = {}
 
 # İngilizce seviyesi -> formlardaki seçeneklerde sırayla denenecek cevaplar
@@ -99,16 +104,29 @@ class LimitReached(Exception):
     """Başvuru limiti veya süre doldu."""
 
 
+class Stopped(BaseException):
+    """Kullanıcı durdurdu (BaseException: kaynaklardaki 'except Exception' bloklarında yutulmasın)."""
+
+
 class SessionLost(Exception):
     """LinkedIn oturumu sonlandırdı (çerez geçersiz)."""
 
 
+LOG_LINES: list[str] = []  # arayüz buradan okur
+
+
 def log(msg: str) -> None:
-    print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
+    line = f"[{dt.datetime.now():%H:%M:%S}] {msg}"
+    LOG_LINES.append(line)
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass  # pencereli uygulamada konsol yok
 
 
 def pause(a: float = 1.5, b: float = 3.5) -> None:
-    time.sleep(random.uniform(a, b))
+    if STOP.wait(random.uniform(a, b)):
+        raise Stopped
 
 
 # ---------------------------------------------------------------- state
@@ -162,7 +180,7 @@ def wait_human(page: Page, check, what: str, minutes: int = 5) -> bool:
     log(f"  !! Açık Chrome penceresinde {what} (en fazla {minutes} dk bekleniyor)...")
     end = time.time() + minutes * 60
     while time.time() < end:
-        time.sleep(3)
+        pause(3, 3)
         if check(page):
             pause(2, 3)
             return True
@@ -563,7 +581,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             except Exception:
                 pass
 
-    resume = ROOT / PROFILE["resume_file"]
+    resume = HOME / PROFILE["resume_file"]
     if external:
         unanswered += fill_yesno(modal)
         fill_checkgroups(modal)
@@ -783,7 +801,7 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> s
     wait = EXT_STATE["last"] + ext.get("min_wait_seconds", 120) - time.time()
     if wait > 0:
         log(f"  .. şirket formu öncesi {int(wait)} sn bekleniyor")
-        time.sleep(wait)
+        pause(wait, wait)
     EXT_STATE["count"] += 1
     EXT_STATE["last"] = time.time()
     log(f"  -> {ats}: {form_url[:90]}")
@@ -952,10 +970,7 @@ def ask(prompt: str, default: str) -> str:
 
 def ask_settings() -> None:
     """CV, maaş ve İngilizce bilgisini kullanıcıdan alır; cevaplar bir sonraki sefere varsayılan olur."""
-    saved = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
-    SETTINGS.update({
-        "resume": PROFILE["resume_file"], "salary": "75000", "english": "3", "notice": "14", **saved,
-    })
+    load_settings()
     if not sys.stdin.isatty():
         log("Terminal yok, kayıtlı ayarlar kullanılıyor.")
     else:
@@ -963,7 +978,7 @@ def ask_settings() -> None:
         while True:
             raw = ask("CV dosyası (PDF/DOCX yolu, dosyayı terminale sürükleyebilirsin)", SETTINGS["resume"])
             path = Path(raw.strip("'\" ").replace("\\ ", " ")).expanduser()
-            path = path if path.is_absolute() else ROOT / path
+            path = path if path.is_absolute() else HOME / path
             if path.is_file() and path.suffix.lower() in (".pdf", ".doc", ".docx"):
                 SETTINGS["resume"] = str(path)
                 break
@@ -981,9 +996,19 @@ def ask_settings() -> None:
         SETTINGS["english"] = eng
         SETTINGS["notice"] = re.sub(r"[^\d]", "", ask("İhbar süresi (gün)", SETTINGS["notice"])) or SETTINGS["notice"]
         cv_setup()
-        SETTINGS_FILE.parent.mkdir(exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
         print()
+    finalize_settings()
+
+
+def load_settings() -> dict:
+    saved = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "english": "3", "notice": "14", **saved})
+    return SETTINGS
+
+
+def finalize_settings() -> None:
+    """Cevapları kaydeder ve profile/aramaya uygular (terminal ve arayüz ortak)."""
+    SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
@@ -992,19 +1017,34 @@ def ask_settings() -> None:
 
 
 def api_key() -> str:
-    """ANTHROPIC_API_KEY ortamdan veya .env'den; yoksa sorulup .env'e yazılır."""
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return os.environ["ANTHROPIC_API_KEY"]
-    env = ROOT / ".env"
+    key = find_key()
+    if key:
+        return key
+    key = input("OpenRouter anahtarı (ücretsiz: openrouter.ai/keys; boş bırakırsan config.yaml kullanılır): ").strip()
+    if key:
+        save_key(key)
+    return key
+
+
+def save_key(key: str) -> None:
+    with (HOME / ".env").open("a") as f:
+        f.write(f"OPENROUTER_API_KEY={key}\n")
+
+
+def find_key() -> str:
+    """OpenRouter anahtarı: ortam değişkeni, .env, ya da indirilen uygulamaya gömülü anahtar."""
+    if os.getenv("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"]
+    env = HOME / ".env"
     if env.exists():
-        m = re.search(r"^ANTHROPIC_API_KEY=(.+)$", env.read_text(), re.M)
+        m = re.search(r"^OPENROUTER_API_KEY=(.+)$", env.read_text(), re.M)
         if m:
             return m.group(1).strip().strip("'\"")
-    key = input("Claude API anahtarı (CV analizi için; boş bırakırsan config.yaml kullanılır): ").strip()
-    if key:
-        with env.open("a") as f:
-            f.write(f"ANTHROPIC_API_KEY={key}\n")
-    return key
+    try:
+        from _bundled_key import KEY  # sadece derlenmiş uygulamada var (GitHub Secret'tan)
+        return KEY
+    except ImportError:
+        return ""
 
 
 def show_profile(prof: dict, locations: list[str]) -> None:
@@ -1034,7 +1074,7 @@ def cv_setup() -> None:
         print("CV analiz ediliyor...")
         import cv_profile
         try:
-            prof = cv_profile.extract(resume, key)
+            prof = cv_profile.extract(resume, key, log=print)
         except Exception as e:
             print(f"  ! CV analiz edilemedi ({e.__class__.__name__}: {str(e)[:150]}); config.yaml kullanılacak.")
             SETTINGS.pop("cv_profile", None)
@@ -1066,17 +1106,34 @@ def apply_cv_profile(prof: dict) -> None:
             PROFILE[k] = prof[k]
     # Linkler CV'de yoksa config'deki başkasının linki kullanılmasın
     PROFILE.update(linkedin=prof["linkedin"], github=prof["github"], current_company="")
+    for k in ("linkedin", "github"):
+        if PROFILE[k] and not PROFILE[k].startswith("http"):
+            PROFILE[k] = "https://" + PROFILE[k]
     PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}"
     if prof.get("phone_intl"):
         # Ülke kodu ayrı sorulduğu için yerel numara: "+90 534 ..." -> "534..."
         PROFILE["phone"] = re.sub(r"\D", "", re.sub(r"^\+\d{1,3}[\s-]", "", prof["phone_intl"]))
+        code = re.match(r"\+(\d{1,3})[\s-]", prof["phone_intl"])
+        PROFILE["country_code"] = f"(+{code.group(1)})" if code else ""
     years = prof["total_years"]
     PROFILE["default_years"] = max(1, min(years, 3))
     search = CFG["search"]
     search["keywords"] = prof["job_titles"]
     search["locations"] = SETTINGS.get("locations") or search["locations"]
     search["experience_levels"] = [1, 2] if years < 2 else [2, 3, 4] if years < 6 else [3, 4, 5]
-    CFG["filters"]["title_include"] = ["|".join(re.escape(w.lower()) for w in prof["title_keywords"])]
+    words = {w for t in prof["job_titles"] for w in re.findall(r"[\w+#]+", t.lower()) if len(w) > 1}
+    words |= {w.lower() for w in prof["title_keywords"]}
+    CFG["filters"]["title_include"] = ["|".join(rf"\b{re.escape(w)}\b" for w in sorted(words))]
+    country = (PROFILE.get("country") or "").strip().lower()
+    if country:
+        names = "turkey|türkiye|turkiye" if country in ("turkey", "türkiye") else re.escape(country)
+        perm = r"authori[sz]ed|legally|permit|eligible|right to work"
+        CFG["answers"].insert(0, {"match": rf"({names}).*({perm})|({perm}).*({names})", "answer": "Yes"})
+    city = re.split(r"[,/]", PROFILE.get("city") or "")[0].strip().lower()
+    if city:
+        # Kendi şehrindeki ofise gidebilir: bu kural genel "on-site -> No" kuralından önce gelir
+        onsite = "commut|on-?site|office|hybrid"
+        CFG["answers"].insert(0, {"match": rf"({onsite}).*{re.escape(city)}|{re.escape(city)}.*({onsite})", "answer": "Yes"})
     CFG["skill_years"] = {re.escape(x["skill"].lower()): x["years"] for x in prof["skills"]}
 
 
@@ -1151,36 +1208,56 @@ def run_linkedin(page: Page, applied: dict, count: int) -> int:
     return count
 
 
-def main() -> int:
-    ask_settings()
-    applied = load_applied()
-    log(f"Başlıyor (DRY_RUN={DRY_RUN}), daha önce işlenen ilan: {len(applied)}")
-    count = 0
+def launch(pw):
+    """Kalıcı profil: sitelere bir kez elle giriş yapılır, oturumlar burada saklanır."""
+    last = None
+    for channel in ("chrome", "msedge"):
+        try:
+            return pw.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                channel=channel,
+                headless=os.getenv("HEADLESS", "false").lower() == "true",
+                locale="en-US",
+                viewport={"width": 1366, "height": 900},
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception as e:
+            last = e
+    raise RuntimeError("Google Chrome bulunamadı. https://www.google.com/chrome adresinden yükleyip tekrar dene.") from last
 
+
+def run_bot() -> int:
+    """Başlangıç bilgileri (SETTINGS) hazırken başvuruları yapar."""
+    global DEADLINE
+    DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
+    STOP.clear()
+    applied = load_applied()
+    log(f"Başlıyor ({'test modu, başvuru gönderilmez' if DRY_RUN else 'gerçek başvuru'}), daha önce işlenen ilan: {len(applied)}")
+    count = 0
     with sync_playwright() as pw:
-        # Kalıcı tarayıcı profili: LinkedIn'e bir kez elle giriş yapılır, oturum burada saklanır.
-        ctx = pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=os.getenv("HEADLESS", "false").lower() == "true",
-            locale="en-US",
-            viewport={"width": 1366, "height": 900},
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        ctx = launch(pw)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(15000)
-
-        if CFG["sources"].get("linkedin", True):
-            count = run_linkedin(page, applied, count)
-
-        import sources
-        count = sources.run(sys.modules[__name__], page, applied, count)
-
-        ctx.close()
-
+        try:
+            if CFG["sources"].get("linkedin", True):
+                count = run_linkedin(page, applied, count)
+            import sources
+            count = sources.run(sys.modules[__name__], page, applied, count)
+        except Stopped:
+            log("Durduruldu.")
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count}\n")
     log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count}")
     return 0
+
+
+def main() -> int:
+    ask_settings()
+    return run_bot()
 
 
 if __name__ == "__main__":

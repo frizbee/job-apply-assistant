@@ -1,0 +1,71 @@
+# Builds the downloadable apps. Runs when a version tag (v1.0.0) is pushed, or by hand from the Actions tab.
+# Optional secret OPENROUTER_APP_KEY: an OpenRouter key with a $0 credit limit (free models only),
+# embedded so users don't need their own. Without it the app asks the user for a free key.
+name: Build apps
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: AutoApply-Mac-AppleSilicon.zip
+          - os: macos-15-intel
+            asset: AutoApply-Mac-Intel.zip
+          - os: windows-latest
+            asset: AutoApply-Windows.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r requirements.txt pyinstaller==6.16.0
+      - name: Embed free-model key
+        shell: bash
+        env:
+          KEY: ${{ secrets.OPENROUTER_APP_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then printf 'KEY = "%s"\n' "$KEY" > _bundled_key.py; fi
+      - name: Build
+        shell: bash
+        run: |
+          sep=":"; [ "$RUNNER_OS" = "Windows" ] && sep=";"
+          pyinstaller --noconfirm --windowed --name AutoApply --collect-all playwright \
+            --add-data "config.yaml${sep}." --hidden-import sources gui.py
+      - name: Self-test (app can drive Chrome)
+        shell: bash
+        env:
+          AUTOAPPLY_SELFTEST: "1"
+          AUTOAPPLY_HOME: ${{ runner.temp }}/home
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then ./dist/AutoApply/AutoApply.exe; else ./dist/AutoApply.app/Contents/MacOS/AutoApply; fi
+          for i in $(seq 1 60); do [ -f "$AUTOAPPLY_HOME/selftest.txt" ] && break; sleep 2; done
+          grep -q selftest-ok "$AUTOAPPLY_HOME/selftest.txt"
+      - name: Package
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -Command "Compress-Archive -Path dist/AutoApply -DestinationPath ${{ matrix.asset }}"
+          else
+            ditto -c -k --keepParent dist/AutoApply.app ${{ matrix.asset }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
