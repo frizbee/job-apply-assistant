@@ -65,14 +65,18 @@ def analyze(body: dict) -> dict:
     if body.get("key"):
         try:
             cv_profile.request("/key", body["key"].strip())
-        except Exception:
-            return {"error": "bad_key"}
+        except cv_profile.urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return {"error": "bad_key"}
+            return {"error": "analyze_failed", "detail": f"OpenRouter HTTP {e.code}"}
+        except Exception as e:
+            return {"error": "analyze_failed", "detail": f"{e.__class__.__name__}: {str(e)[:150]}"}
         apply.save_key(body["key"].strip())
     key = apply.find_key()
     if not key:
         return {"error": "no_key"}
-    resume = Path(apply.SETTINGS.get("resume", ""))
-    if not resume.exists():
+    resume = Path(apply.SETTINGS.get("resume") or "missing")
+    if not resume.is_file():
         return {"error": "no_cv"}
     STATE["analyzing"] = True
     try:
@@ -90,7 +94,7 @@ def start(body: dict) -> dict:
     if STATE["running"]:
         return {"error": "already_running"}
     s = apply.SETTINGS
-    if not Path(s.get("resume", "")).exists():
+    if not Path(s.get("resume") or "missing").is_file():
         return {"error": "no_cv"}
     prof = {**(s.get("cv_profile") or {"title_keywords": [], "skills": [], "cover_letter": ""}), **body["profile"]}
     if not prof.get("job_titles"):

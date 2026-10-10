@@ -29,7 +29,8 @@ core = None  # apply modülü; run() içinde atanır
 
 def http(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, text/xml, */*"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    from cv_profile import SSL_CTX
+    with urllib.request.urlopen(req, timeout=30, context=SSL_CTX) as r:
         return r.read().decode("utf-8", "ignore")
 
 

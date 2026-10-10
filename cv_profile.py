@@ -5,12 +5,19 @@ model listesinden doğrulanır. Ücretli modele hiçbir koşulda istek gönderil
 """
 import json
 import re
+import ssl
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
 
 API = "https://openrouter.ai/api/v1"
+# Derlenmiş uygulamada sistem sertifikaları bulunamayabiliyor; certifi paketiyle gelenleri kullan
+try:
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CTX = ssl.create_default_context()
 # Tercih sırası; listede olmayan/ücretli hale gelenler atlanır, hiçbiri yoksa herhangi bir ücretsiz model
 PREFERRED = [
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -78,7 +85,7 @@ def request(path: str, key: str, body: dict | None = None) -> dict:
         API + path, data=json.dumps(body).encode() if body else None,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                  "HTTP-Referer": "https://github.com/klncgty/linkedin-auto-apply", "X-Title": "Auto Apply"})
-    with urllib.request.urlopen(req, timeout=180) as r:
+    with urllib.request.urlopen(req, timeout=180, context=SSL_CTX) as r:
         return json.loads(r.read())
 
 
