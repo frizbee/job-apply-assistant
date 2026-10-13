@@ -22,6 +22,16 @@ Go to **[Releases](../../releases/latest)** and download the file for your compu
 
 Not sure which Mac you have?  → Apple menu  → **About This Mac** → look at "Chip".
 
+**Linux?** There is no download file yet. Install it with these commands in a terminal instead (one time):
+
+```bash
+git clone https://github.com/klncgty/linkedin-auto-apply.git
+cd linkedin-auto-apply
+./install-linux.sh
+```
+
+The installer sets up everything, including Google Chrome if it's missing (it may ask for your password). Afterwards, open **Auto Apply** from your app menu (or run `./run.sh` in that folder) and continue with step 3 below.
+
 **2. Open it**
 
 - **Windows:** Right-click the zip → **Extract All**. Open the folder and double-click **AutoApply.exe**.
@@ -85,7 +95,7 @@ cd linkedin-auto-apply
 ./run.sh --terminal # terminal-only mode
 ```
 
-**Linux:** run `./install-linux.sh` once. It installs Python packages and Google Chrome if missing (x86_64 Debian/Ubuntu/Fedora; may ask for your sudo password) and adds **Auto Apply** to the app menu. Then start it from the menu or with `./run.sh`. A desktop session is needed because the app opens a Chrome window.
+**Linux:** run `./install-linux.sh` once. It installs the Python packages and Google Chrome if missing (automatic on x86_64 Debian/Ubuntu/Fedora; may ask for your sudo password) and adds **Auto Apply** to the app menu. A desktop session is needed because the app opens a Chrome window.
 
 - **CV reading:** set `OPENROUTER_API_KEY` in `.env` (a free key from [openrouter.ai/keys](https://openrouter.ai/keys)). Only `:free` models are ever called.
 - **Advanced settings** (sources, limits, form-answer rules) are in `config.yaml`.
