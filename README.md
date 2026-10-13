@@ -85,6 +85,8 @@ cd linkedin-auto-apply
 ./run.sh --terminal # terminal-only mode
 ```
 
+**Linux:** run `./install-linux.sh` once. It installs Python packages and Google Chrome if missing (x86_64 Debian/Ubuntu/Fedora; may ask for your sudo password) and adds **Auto Apply** to the app menu. Then start it from the menu or with `./run.sh`. A desktop session is needed because the app opens a Chrome window.
+
 - **CV reading:** set `OPENROUTER_API_KEY` in `.env` (a free key from [openrouter.ai/keys](https://openrouter.ai/keys)). Only `:free` models are ever called.
 - **Advanced settings** (sources, limits, form-answer rules) are in `config.yaml`.
 - **Building the apps:** push a tag like `v1.0.0` and GitHub Actions attaches the Windows and Mac builds to the release.
