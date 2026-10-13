@@ -1101,7 +1101,7 @@ def finalize_settings() -> None:
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
-    log(f"CV: {Path(SETTINGS['resume']).name} | maaş: {SETTINGS['salary']} | "
+    log(f"CV: {Path(SETTINGS['resume']).name} | maaş: {', '.join(f'{v} {c}' for c, v in (SETTINGS.get('monthly_salary_by_currency') or {}).items()) + ' /ay' if SETTINGS.get('monthly_salary_by_currency') else SETTINGS['salary'] + ' /yıl'} | "
         f"İngilizce: {ENGLISH_LEVELS[SETTINGS['english']][0]} | ihbar: {SETTINGS['notice']} gün")
 
 

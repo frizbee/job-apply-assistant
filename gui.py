@@ -38,7 +38,7 @@ def open_folder(path: Path) -> None:
 def state() -> dict:
     s = apply.SETTINGS
     return {
-        "settings": {k: s.get(k) for k in ("salary", "currency", "english", "notice", "locations", "sources", "test_mode")},
+        "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode")},
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
         "profile": s.get("cv_profile"),
         "has_key": bool(apply.find_key()),
@@ -108,8 +108,17 @@ def start(body: dict) -> dict:
     if missing:
         return {"error": "missing", "fields": missing}
     prof["total_years"] = int(prof.get("total_years") or 0)
-    s.update(cv_profile=prof, salary=re.sub(r"\D", "", str(body["salary"])) or s["salary"],
-             currency=body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD",
+    # Aylık beklentiler: kendi para birimi + EUR + USD. Yıllık "salary" diğer para birimlerine çevirmenin tabanı.
+    cur = body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD"
+    monthly = {}
+    for c, v in ((cur, body.get("salary")), ("EUR", body.get("salary_eur")), ("USD", body.get("salary_usd"))):
+        if v := re.sub(r"\D", "", str(v or "")):
+            monthly[c] = int(v)
+    if monthly:
+        s.update(monthly_salary_by_currency=monthly, home_currency=cur)
+        base = next(c for c in ("USD", "EUR", cur) if c in monthly)
+        s.update(currency=base, salary=str(monthly[base] * 12))
+    s.update(cv_profile=prof,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
              locations=body["locations"] or apply.CFG["search"]["locations"],
              sources=body["sources"], test_mode=bool(body["test_mode"]))
@@ -247,9 +256,13 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
   <label data-t="locations"></label><textarea id="locations" style="min-height:60px"></textarea>
   <div class="grid3">
     <div><label data-t="years"></label><input type="text" id="total_years"></div>
-    <div><label data-t="salary"></label><div style="display:flex;gap:6px"><input type="text" id="salary">
-      <select id="currency" style="width:90px"><option>USD</option><option>EUR</option><option>GBP</option><option>TRY</option><option>PLN</option><option>CHF</option></select></div></div>
     <div><label data-t="notice"></label><input type="text" id="notice"></div>
+  </div>
+  <div class="grid3">
+    <div><label data-t="salary"></label><div style="display:flex;gap:6px"><input type="text" id="salary">
+      <select id="currency" style="width:90px"><option>TRY</option><option>USD</option><option>EUR</option><option>GBP</option><option>PLN</option><option>CHF</option><option>INR</option><option>CAD</option></select></div></div>
+    <div><label data-t="salary_eur"></label><input type="text" id="salary_eur" placeholder="EUR"></div>
+    <div><label data-t="salary_usd"></label><input type="text" id="salary_usd" placeholder="USD"></div>
   </div>
   <p class="hint" data-t="salary_hint" style="margin:6px 0 0"></p>
   <label data-t="english"></label><select id="english"></select>
@@ -281,9 +294,9 @@ const T = {
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
-  titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Yearly salary expectation",
+  titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
-  salary_hint:"If a form asks in another currency, per month or per hour, the app converts it automatically.",
+  salary_hint:"Net amounts per month. A form asking in one of these currencies gets that number (x12 if it asks per year). Other currencies and hourly rates are converted automatically.",
   step3:"Step 3", where_title:"Where to apply", where_hint:"Only remote jobs posted in the last 7 days. Company websites are limited to a few per run so you are not flagged as spam.",
   test_mode:"Test mode (fill forms but do NOT send) - recommended for your first run",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
@@ -301,9 +314,9 @@ const T = {
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
-  titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Yıllık maaş beklentisi",
+  titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
-  salary_hint:"Form başka para biriminde, aylık ya da saatlik sorarsa uygulama otomatik çevirir.",
+  salary_hint:"Aylık tutarlar. Form bu para birimlerinden biriyle sorarsa o tutar yazılır (yıllık sorarsa x12). Diğer para birimleri ve saatlik ücret otomatik çevrilir.",
   step3:"Adım 3", where_title:"Nereye başvurulsun", where_hint:"Sadece son 7 günde yayınlanan remote ilanlar. Şirket sitelerine her çalıştırmada az sayıda başvurulur, spam sayılmamak için.",
   test_mode:"Test modu (formları doldurur ama GÖNDERMEZ) - ilk çalıştırmada önerilir",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
@@ -343,7 +356,9 @@ async function load() {
   $("keybox").classList.toggle("hidden", S.has_key);
   $("changekey").classList.toggle("hidden", !S.has_key);
   const st = S.settings; render();
-  $("english").value = st.english || "3"; $("salary").value = st.salary || ""; $("currency").value = st.currency || "USD"; $("notice").value = st.notice || "";
+  $("english").value = st.english || "3"; const ms = st.monthly_salary_by_currency || {}, cur = st.home_currency || st.currency || "USD";
+  $("currency").value = cur; $("salary").value = ms[cur] ?? (st.salary ? Math.round(st.salary / 12) : "");
+  $("salary_eur").value = ms.EUR ?? ""; $("salary_usd").value = ms.USD ?? ""; $("notice").value = st.notice || "";
   $("locations").value = (st.locations || S.default_locations).join("\n");
   const on = st.sources || Object.keys(SOURCES);
   $("sources").innerHTML = Object.entries(SOURCES).map(([k, v]) => `<label><input type="checkbox" value="${k}" ${on.includes(k) ? "checked" : ""}> ${v}</label>`).join("");
@@ -375,7 +390,8 @@ $("start").onclick = async () => {
   const profile = {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
-  const body = { profile, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value, notice: $("notice").value, english: $("english").value,
+  const body = { profile, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+    salary_eur: $("salary_eur").value, salary_usd: $("salary_usd").value, notice: $("notice").value, english: $("english").value,
     sources: [...document.querySelectorAll("#sources input:checked")].map(e => e.value), test_mode: $("test_mode").checked };
   document.querySelectorAll("input.missing").forEach(e => e.classList.remove("missing"));
   const r = await api("/api/start", body);
