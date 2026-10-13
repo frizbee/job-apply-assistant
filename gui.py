@@ -273,6 +273,7 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
   <div class="step" data-t="step3"></div><h2 data-t="where_title"></h2><p class="hint" data-t="where_hint"></p>
   <div class="checks" id="sources"></div>
   <div class="checks"><label><input type="checkbox" id="test_mode"> <span data-t="test_mode"></span></label></div>
+  <p class="hint" id="test_hint" style="margin:-4px 0 12px"></p>
   <div class="notice" data-t="chrome_notice"></div>
   <div class="row"><button id="start" data-t="start"></button><button class="danger hidden" id="stop" data-t="stop"></button>
     <button class="secondary" id="results" data-t="results"></button></div>
@@ -298,7 +299,9 @@ const T = {
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
   salary_hint:"Net amounts per month. A form asking in one of these currencies gets that number (x12 if it asks per year). Other currencies and hourly rates are converted automatically.",
   step3:"Step 3", where_title:"Where to apply", where_hint:"Only remote jobs posted in the last 7 days. Company websites are limited to a few per run so you are not flagged as spam.",
-  test_mode:"Test mode (fill forms but do NOT send) - recommended for your first run",
+  test_mode:"Test mode (fill in forms but do NOT send them)",
+  test_off:"Test mode is OFF: real applications will be sent. Tick the box if you only want to try the app first.",
+  test_on:"Test mode is ON: this is only a test run. Forms are filled in but NO application is sent. Untick the box to really apply.",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
   err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.",
@@ -318,7 +321,9 @@ const T = {
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
   salary_hint:"Aylık tutarlar. Form bu para birimlerinden biriyle sorarsa o tutar yazılır (yıllık sorarsa x12). Diğer para birimleri ve saatlik ücret otomatik çevrilir.",
   step3:"Adım 3", where_title:"Nereye başvurulsun", where_hint:"Sadece son 7 günde yayınlanan remote ilanlar. Şirket sitelerine her çalıştırmada az sayıda başvurulur, spam sayılmamak için.",
-  test_mode:"Test modu (formları doldurur ama GÖNDERMEZ) - ilk çalıştırmada önerilir",
+  test_mode:"Test modu (formları doldurur ama GÖNDERMEZ)",
+  test_off:"Test modu KAPALI: gerçek başvurular gönderilir. Önce sadece denemek istersen kutuyu işaretle.",
+  test_on:"Test modu AÇIK: bu sadece bir deneme. Formlar doldurulur ama HİÇBİR başvuru gönderilmez. Gerçekten başvurmak için işareti kaldır.",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
   err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.",
@@ -337,7 +342,13 @@ function render() {
   const v = $("english").value;
   $("english").innerHTML = Object.entries(t("levels")).map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
   if (v) $("english").value = v;
+  testHint();
 }
+function testHint() {
+  const on = $("test_mode").checked, h = $("test_hint");
+  h.textContent = t(on ? "test_on" : "test_off"); h.style.color = on ? "var(--warn)" : "var(--ok)"; h.style.fontWeight = 600;
+}
+$("test_mode").onchange = testHint;
 async function api(path, body) {
   const r = await fetch(path, { method: body ? "POST" : "GET", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   return r.json();
@@ -362,7 +373,7 @@ async function load() {
   $("locations").value = (st.locations || S.default_locations).join("\n");
   const on = st.sources || Object.keys(SOURCES);
   $("sources").innerHTML = Object.entries(SOURCES).map(([k, v]) => `<label><input type="checkbox" value="${k}" ${on.includes(k) ? "checked" : ""}> ${v}</label>`).join("");
-  $("test_mode").checked = st.test_mode ?? true;
+  $("test_mode").checked = st.test_mode ?? false;
   if (S.profile) fill(S.profile);
   if (S.running) watch();
   render();

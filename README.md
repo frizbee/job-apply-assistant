@@ -6,6 +6,11 @@ LinkedIn (Easy Apply) · Indeed · Wellfound · Remote OK · Himalayas · We Wor
 
 No coding needed. Free.
 
+<p align="center">
+  <a href="docs/autoapply-demo.mp4"><img src="docs/autoapply-demo.gif" alt="How to use Auto Apply: upload your CV, check your details and salary, start applying" width="800"></a>
+  <br><sub>How it works in 40 seconds. Click for the full-quality video.</sub>
+</p>
+
 ---
 
 ## How to use (no coding)
@@ -50,7 +55,7 @@ A page opens in your browser:
 1. **Your CV:** choose your CV (PDF or Word) and click **Read my CV**.
    The first time, the app asks for a free key (see below).
 2. **Check your details:** fix anything wrong and set your English level and your **monthly** salary expectation three ways: in your own currency (you pick it), in EUR and in USD.
-3. **Start applying.** Leave **Test mode** on for your first try: it fills forms but does not send them.
+3. **Start applying.** **Test mode** is off by default, so real applications are sent. If you only want to try the app first, tick **Test mode**: forms are filled in but nothing is sent. Untick it again to really apply.
 
 A Chrome window opens. The first time, **log in to LinkedIn** (and Indeed / Wellfound) in that window. If you see a "verify you are human" box, tick it. The app waits for you and remembers your login.
 
