@@ -270,11 +270,16 @@ def rates() -> dict[str, float]:
 def salary_answer(question: str) -> str:
     """Yıllık beklentiyi sorudaki para birimine ve döneme (aylık/saatlik/bin) çevirir."""
     q = question.lower()
+    turkish = bool(re.search(r"maaş|ücret", q))
     amount = float(SETTINGS.get("salary") or 0)
     have = SETTINGS.get("currency", "USD")
     # Dolar işareti CAD sorularında da geçer; önce özel kodlara bak
-    want = next((c for c in ("CAD", "TRY", "PLN", "CHF", "INR", "GBP", "EUR", "USD") if re.search(CURRENCY_RE[c], q)), have)
-    if want != have:
+    want = next((c for c in ("CAD", "TRY", "PLN", "CHF", "INR", "GBP", "EUR", "USD") if re.search(CURRENCY_RE[c], q)),
+                "TRY" if turkish else have)  # Türkçe soru, birim yok: TL
+    fixed = SETTINGS.get("monthly_salary_by_currency") or {}  # ör. {"EUR": 2200, "TRY": 80000}: kurla çevirmek yerine bu
+    if want in fixed:
+        amount = float(fixed[want]) * 12
+    elif want != have:
         r = rates()
         if have in r and want in r:
             amount = amount / r[have] * r[want]
@@ -282,7 +287,8 @@ def salary_answer(question: str) -> str:
         amount, step = amount / 2080, 1
     elif re.search(r"\bday\b|daily|günlük", q):
         amount, step = amount / 220, 5
-    elif re.search(r"month|aylık|monat|mensuel", q):
+    elif re.search(r"month|aylık|monat|mensuel", q) or ((want == "TRY" or turkish) and not re.search(r"year|annual|yıllık", q)):
+        # Türkiye'de dönem yazmayan maaş sorusu aylık demektir
         amount, step = amount / 12, 100
     else:
         step = 1000
