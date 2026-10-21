@@ -81,6 +81,7 @@ The app remembers it. To use a different key later, click **Change key** in step
 ## Good to know
 
 - Only remote jobs posted in the last 7 days are considered. The same job is never applied to twice, even if it appears on several sites.
+- Date and workplace checks apply to every source, including LinkedIn recommendations. Missing, invalid or ambiguous metadata goes to `manual_apply.csv` as `metadata_manual`; old, hybrid and on-site jobs are skipped. Search filters and a remote board's name alone are not evidence. Relative dates are interpreted conservatively, so borderline jobs may be skipped. Explicit geographic restrictions use your configured accepted-region policy; this does not establish legal work authorization.
 - Company websites are visited only a few times per run, slowly, so you don't get flagged as spam.
 - Unknown answers are not guessed. Forms with unresolved questions go to `manual_apply.csv` without being submitted (including in test mode). This is conservative: even an unknown optional question may require manual review. Existing answers on the site should still be checked by you.
 - Company-site forms are filled only on explicitly approved HTTPS hosts for Greenhouse, Lever and Ashby (listed in `apply.py`, `ATS`). Lookalike domains, HTTP, credentials in URLs, and nonstandard ports are not trusted. Redirects and native form submission targets are checked; unsupported sites go to `manual_apply.csv`. A company page may be visited to discover a trusted embedded ATS form, but is not itself filled.

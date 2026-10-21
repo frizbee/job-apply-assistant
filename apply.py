@@ -32,6 +32,7 @@ from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 import yaml
+import job_metadata
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -1277,6 +1278,43 @@ def job_ok(title: str, company: str, description: str) -> str | None:
     return None
 
 
+def read_job_metadata(page: Page, source: str, url: str) -> dict:
+    try:
+        return job_metadata.page_metadata(page, source, url)
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        log(f"  ? job metadata unavailable: {e.__class__.__name__}")
+        return {}
+
+
+def job_location_ok(text: str) -> bool:
+    """Apply the configured accepted-region policy consistently across sources."""
+    if not text.strip():
+        return True
+    regions = CFG["search"].get("accepted_regions", "anywhere|worldwide|global")
+    country = re.escape(PROFILE.get("country", ""))
+    return bool(re.search(rf"{regions}|{country}" if country else regions, text, re.I))
+
+
+def check_job_eligibility(job: dict, applied: dict) -> bool:
+    """Shared final gate: search URLs and board names are not eligibility evidence."""
+    search = CFG["search"]
+    reason = job_metadata.eligibility_reason(job.get("metadata") or {}, search["posted_within_hours"],
+                                             search.get("remote_only", False))
+    if reason is None and not job_location_ok((job.get("metadata") or {}).get("location") or job.get("location", "")):
+        reason = "location_restricted"
+    if reason is None:
+        return True
+    unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown")
+    status = "metadata_manual" if unknown else reason
+    log(f"- atla [{reason}] {job['title']} @ {job['company']}")
+    if unknown:
+        record_manual(job["id"], job["title"], job["company"], job["url"], reason)
+    record(applied, job["id"], job["title"], job["company"], status, job["url"])
+    return False
+
+
 # ---------------------------------------------------------------- başlangıç soruları
 
 def ask(prompt: str, default: str) -> str:
@@ -1460,6 +1498,11 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         if reason:
             log(f"- atla [{reason}] {title} @ {company}")
             record(applied, job_id, title, company, reason)
+            return False
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        job = {"id": job_id, "title": title, "company": company, "url": url,
+               "metadata": read_job_metadata(page, "linkedin", url)}
+        if not check_job_eligibility(job, applied):
             return False
         log(f"> {title} @ {company}")
         status = apply_to_job(page, job_id, title, company, applied)

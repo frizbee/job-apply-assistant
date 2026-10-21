@@ -15,6 +15,7 @@ import re
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+import job_metadata
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
 
@@ -39,12 +40,8 @@ def strip_html(s: str) -> str:
 
 
 def fresh(ts: dt.datetime | float | None) -> bool:
-    if ts is None:
-        return True
-    if not isinstance(ts, dt.datetime):
-        ts = dt.datetime.fromtimestamp(float(ts), dt.timezone.utc)
-    age = dt.datetime.now(dt.timezone.utc) - ts
-    return age.total_seconds() <= core.CFG["search"]["posted_within_hours"] * 3600
+    return job_metadata.eligibility_reason({"posted_at": ts},
+        core.CFG["search"]["posted_within_hours"], remote_only=False) is None
 
 
 def keyword_match(title: str) -> bool:
@@ -58,11 +55,7 @@ def keyword_match(title: str) -> bool:
 
 
 def location_ok(text: str) -> bool:
-    if not text.strip():
-        return True
-    regions = core.CFG["search"].get("accepted_regions", "anywhere|worldwide|global")
-    country = re.escape(core.PROFILE.get("country", ""))
-    return bool(re.search(rf"{regions}|{country}" if country else regions, text, re.I))
+    return core.job_location_ok(text)
 
 
 def page_ready(page) -> bool:
@@ -101,10 +94,13 @@ def remoteok(page):
             jobs[j["id"]] = j
         time.sleep(1)
     for j in jobs.values():
-        if not fresh(j.get("epoch")) or not keyword_match(j.get("position", "")):
+        if not keyword_match(j.get("position", "")):
             continue
         job = {"id": f"remoteok:{j['id']}", "title": j["position"], "company": j.get("company", ""),
-               "url": j["url"], "desc": strip_html(j.get("description", "")), "location": j.get("location", "")}
+               "url": j["url"], "desc": strip_html(j.get("description", "")), "location": j.get("location", ""),
+               "metadata": {"posted_at": j.get("epoch") or j.get("date"),
+                            "workplace": job_metadata.workplace_kind(j.get("workplaceType"), j.get("remote"), j.get("location")),
+                            "location": j.get("location", "")}}
 
         def apply(job=job):
             if not goto(page, job["url"], "Remote OK"):
@@ -120,13 +116,16 @@ def himalayas(page):
     for kw in core.CFG["search"]["keywords"]:
         data = json.loads(http(f"https://himalayas.app/jobs/api/search?q={quote_plus(kw)}&limit=20"))
         for j in data.get("jobs", []):
-            if j["guid"] in seen or not fresh(j.get("pubDate")) or not keyword_match(j["title"]):
+            if j["guid"] in seen or not keyword_match(j["title"]):
                 continue
             seen.add(j["guid"])
             job = {"id": "himalayas:" + j["guid"].rsplit("/companies/", 1)[-1], "title": j["title"],
                    "company": j.get("companyName", ""), "url": j["applicationLink"],
                    "desc": strip_html(j.get("description", "")),
-                   "location": ", ".join(j.get("locationRestrictions") or [])}
+                   "location": ", ".join(j.get("locationRestrictions") or []),
+                   "metadata": {"posted_at": j.get("pubDate"),
+                                "workplace": job_metadata.workplace_kind(j.get("workplaceType"), j.get("remote")),
+                                "location": ", ".join(j.get("locationRestrictions") or [])}}
 
             def apply(job=job):
                 if not goto(page, job["url"], "Himalayas"):
@@ -154,11 +153,14 @@ def weworkremotely(page):
             posted = parsedate_to_datetime(item.findtext("pubDate"))
         except (TypeError, ValueError):
             posted = None
-        if not title or not fresh(posted) or not keyword_match(title):
+        if not title or not keyword_match(title):
             continue
         link = item.findtext("link") or ""
         job = {"id": "wwr:" + link.rstrip("/").rsplit("/", 1)[-1], "title": title, "company": company,
-               "url": link, "desc": strip_html(item.findtext("description")), "location": item.findtext("region") or ""}
+               "url": link, "desc": strip_html(item.findtext("description")), "location": item.findtext("region") or "",
+               "metadata": {"posted_at": posted,
+                            "workplace": job_metadata.workplace_kind(item.findtext("workplaceType"), item.findtext("region")),
+                            "location": item.findtext("region") or ""}}
 
         def apply(job=job):
             if not goto(page, job["url"], "We Work Remotely"):
@@ -365,11 +367,20 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 if prev and not prev["status"].startswith(core.RETRY_PREFIXES):
                     continue
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
-                          or (None if location_ok(job["location"]) else "location_restricted")
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
                     core.log(f"- atla [{reason}] {job['title']} @ {job['company']}")
                     core.record(applied, job["id"], job["title"], job["company"], reason, job["url"])
+                    continue
+                metadata = job.get("metadata") or {}
+                # Resolve unknown metadata from this job's detail page, not search cards.
+                preliminary = job_metadata.eligibility_reason(metadata, core.CFG["search"]["posted_within_hours"],
+                                                               core.CFG["search"].get("remote_only", False))
+                if preliminary in ("posting_date_unknown", "posting_date_future", "workplace_unknown"):
+                    if page.url == job["url"] or goto(page, job["url"], name):
+                        metadata = job_metadata.merge_metadata(metadata, core.read_job_metadata(page, name, job["url"]))
+                job["metadata"] = metadata
+                if not core.check_job_eligibility(job, applied):
                     continue
                 core.log(f"> {job['title']} @ {job['company']} ({name})")
                 try:
