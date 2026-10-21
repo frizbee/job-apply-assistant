@@ -82,6 +82,7 @@ The app remembers it. To use a different key later, click **Change key** in step
 
 - Only remote jobs posted in the last 7 days are considered. The same job is never applied to twice, even if it appears on several sites.
 - Company websites are visited only a few times per run, slowly, so you don't get flagged as spam.
+- Unknown answers are not guessed. Forms with unresolved questions go to `manual_apply.csv` without being submitted (including in test mode). This is conservative: even an unknown optional question may require manual review. Existing answers on the site should still be checked by you.
 - Salary questions get the amount you entered for that currency (EUR, USD or your own; multiplied by 12 if the form asks per year). Other currencies and hourly rates are converted using daily exchange rates. A Turkish-language question without a currency is answered in TL per month.
 - **It costs nothing.** Your CV is read by a free AI model on [OpenRouter](https://openrouter.ai). The app only uses free models, so you never pay. No credit card is needed. Your data stays on your computer except for that one request.
 - Your files are stored in the **AutoApply** folder in your home folder.
@@ -104,4 +105,14 @@ cd linkedin-auto-apply
 
 - **CV reading:** set `OPENROUTER_API_KEY` in `.env` (a free key from [openrouter.ai/keys](https://openrouter.ai/keys)). Only `:free` models are ever called.
 - **Advanced settings** (sources, limits, form-answer rules) are in `config.yaml`.
+- **Sensitive answers:** visas, work authorization, qualifications, relocation and consent are not inferred from your CV or location. To confirm an answer, add the complete question and your answer to `confirmed_answers` in `config.yaml`, for example:
+
+  ```yaml
+  confirmed_answers:
+    "Will you require visa sponsorship?": "Yes"
+  ```
+
+  Questions must match exactly (ignoring case and surrounding whitespace). These answers are your explicit instructions; do not add a generic default. A `manual_review` result is not automatically retried: apply manually using the saved link.
+- **Experience:** configure confirmed skill years in `skill_years` (for example, `python: 3`). AI estimates from the CV do not overwrite these values. Unknown skills and unrelated numeric questions stay unanswered.
+- **Tests:** install `requirements.txt`, then run `python -m unittest discover -s tests -v`. Tests use temporary application data, mocked submission controls, and no real job sites. Optional local-HTML Chrome tests: `AUTOAPPLY_BROWSER_TESTS=1 python -m unittest discover -s tests -v` (requires Chrome). Python 3.12 is used for verification; the pinned Playwright dependency does not install successfully on Python 3.14.
 - **Building the apps:** push a tag like `v1.0.0` and GitHub Actions attaches the Windows and Mac builds to the release.

@@ -206,12 +206,11 @@ def wellfound_apply(page, job: dict) -> str:
     if not form.count():
         core.screenshot(page, f"{job['id'].replace(':', '_')}_noform")
         return "skipped_no_form"
-    for ta in form.locator("textarea:visible").all():
-        if not ta.input_value().strip():
-            ta.fill(core.PROFILE["cover_letter"])
     unanswered = core.fill_step(page, form, external=True)
+    if core.require_manual_review(page, form, unanswered, job["id"], job["title"], job["company"], job["url"]):
+        return "manual_review"
     send = form.get_by_role("button", name=re.compile(r"send application|submit|^apply", re.I)).last
-    if unanswered or not send.count():
+    if not send.count():
         core.screenshot(page, f"{job['id'].replace(':', '_')}_unanswered")
         return "skipped_unanswered"
     if core.DRY_RUN:
@@ -279,7 +278,9 @@ def indeed_apply(page, job: dict) -> str:
         if INDEED_DONE_RE.search(ap.locator("body").inner_text()[:5000]):
             return "applied"
         scope = ap.locator("main").first if ap.locator("main").count() else ap.locator("body")
-        core.fill_step(ap, scope, external=True)
+        unanswered = core.fill_step(ap, scope, external=True)
+        if core.require_manual_review(ap, scope, unanswered, job["id"], job["title"], job["company"], job["url"]):
+            return "manual_review"
         primary = ap.get_by_role("button", name=re.compile(
             r"^(continue|review your application|submit your application|devam|başvurunu gönder)", re.I)).last
         if not primary.count():

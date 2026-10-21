@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------
 # LinkedIn Easy Apply ayarları. Her şeyi buradan değiştirebilirsin.
-# CV analizi onaylanırsa pozisyonlar, başlık filtresi, yetenek yılları ve
+# CV analizi onaylanırsa pozisyonlar, başlık filtresi ve
 # profil bilgileri CV'den gelen değerlerle değiştirilir (bu dosya değişmez).
 # ---------------------------------------------------------------
 
@@ -78,52 +78,36 @@ profile:
   country: ""
   linkedin: ""
   github: ""
-  default_years: 2             # bilinmeyen teknoloji için "kaç yıl" sorusuna cevap
-  default_yes_no: "Yes"        # eşleşen kural yoksa Evet/Hayır sorusuna cevap
   resume_file: ""
   cover_letter: ""
 
-# "Kaç yıl deneyimin var?" sorularında soru metnine göre yıl (CV'den doldurulur)
+# User-confirmed years only (regex skill name -> nonnegative number).
+# CV estimates are not automatically trusted. Example: python: 3
 skill_years: {}
+
+# Only answers explicitly confirmed by the user, keyed by the complete question.
+# Example: "Will you require visa sponsorship?": "Yes"
+# No answers are inferred from residence, remote work, or the CV for legal questions.
+confirmed_answers: {}
 
 # Form soruları için kurallar. Soru metni (küçük harf) "match" regex'ine uyarsa
 # "answer" kullanılır. Liste verirsen seçenekli sorularda sırayla denenir.
-# Sıra önemli: ilk eşleşen kazanır.
+# Sıra önemli: ilk eşleşen kazanır. Bilinmeyen sorular manuel incelemeye gider.
+# Vize, çalışma izni, eğitim, diğer diller ve hukuki onaylar için varsayılan yoktur.
+# Hassas soruların tam metni için yukarıdaki confirmed_answers alanını kullanın.
 answers:
   - match: 'country code|ülke.*kodu'
     answer: "__COUNTRY_CODE__"   # telefondan, ör. "(+90)"
   - match: 'phone|mobile|telefon'
     answer: "__PHONE__"
-  - match: 'sponsor|visa'
-    answer: "No"               # remote çalışacağın için; onsite yurtdışı ilanlarda "Yes" olmalı
-  - match: 'authori[sz]ed to work|legally (authori[sz]ed|allowed|eligible)|work permit|right to work|citizen'
-    answer: "No"
-  - match: 'remote'
-    answer: "Yes"
-  - match: 'relocat'
-    answer: "Yes"
-  - match: 'commut|on-?site|in the office|hybrid'
-    answer: "No"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
     answer: "__ENGLISH__"      # başlangıçta sorulan seviye
-  - match: 'turkish|turecki|türkisch|türkçe'
-    answer: ["Native", "Ojczysty", "Muttersprache", "Yes"]
-  - match: 'studying|student|enrolled|öğrenci'
-    answer: "No"
   - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
     answer: "__SALARY__"       # başlangıçta sorulan yıllık beklenti
   - match: 'notice period|ihbar'
     answer: "__NOTICE__"
-  - match: 'start date|availab\w* to start|when can you start|start a new role'
-    answer: ["Immediately", "2 weeks"]
-  - match: "bachelor|degree|lisans"
-    answer: ["Yes", "Bachelor's Degree", "Bachelor"]
-  - match: 'education|highest level'
-    answer: ["Bachelor's Degree", "Bachelor", "Lisans"]
   - match: 'gender|race|ethnic|veteran|disabilit|pronoun|sexual orientation'
     answer: ["Decline to self-identify", "I don't wish to answer", "Prefer not to say", "Decline", "I do not want to answer"]
-  - match: 'hear about|how did you find'
-    answer: ["LinkedIn"]
   - match: 'linkedin'
     answer: "__LINKEDIN__"
   - match: 'github|portfolio|website|personal site'
@@ -132,7 +116,5 @@ answers:
     answer: "__COUNTRY__"
   - match: '\bcity\b|location|şehir|where are you (based|located)'
     answer: "__CITY__"
-  - match: 'cover letter|why (are you|do you want)|interested in|additional information|anything else|tell us|about yourself|message to the hiring'
+  - match: '^cover letter\b|^message to the hiring (team|manager)\b'
     answer: "__COVER_LETTER__"
-  - match: 'privacy|consent|agree|terms|acknowledge'
-    answer: ["Yes", "I agree", "I Agree", "Agree"]

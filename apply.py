@@ -24,6 +24,7 @@ import json
 import os
 import random
 import re
+import secrets
 import sys
 import threading
 import time
@@ -55,24 +56,30 @@ SETTINGS: dict = {}
 
 # İngilizce seviyesi -> formlardaki seçeneklerde sırayla denenecek cevaplar
 ENGLISH_LEVELS = {
-    "1": ("Native / iki dilli", ["Native or bilingual", "Native", "Bilingual", "Fluent", "C2", "Yes"]),
-    "2": ("Akıcı / profesyonel", ["Full professional", "Professional working", "Fluent", "Advanced", "C1", "Yes"]),
-    "3": ("Orta / konuşma", ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany", "Yes"]),
-    "4": ("Temel", ["Elementary", "Basic", "Beginner", "A2", "No"]),
+    "1": ("Native / iki dilli", ["Native or bilingual", "Native", "Bilingual", "Fluent", "C2"]),
+    "2": ("Akıcı / profesyonel", ["Full professional", "Professional working", "Fluent", "Advanced", "C1"]),
+    "3": ("Orta / konuşma", ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany"]),
+    "4": ("Temel", ["Elementary", "Basic", "Beginner", "A2"]),
 }
 
 EASY_APPLY_RE = re.compile(r"easy apply|kolay başvuru", re.I)
 PLACEHOLDER_RE = re.compile(r"select an option|seçenek belirleyin|seçin|seçiniz|wybierz|bitte wählen|choose an option", re.I)
-OPEN_QUESTION_RE = re.compile(
-    r"describe|explain|tell us|tell me|walk us|example|how (do|did|would|have) you|why|"
-    r"what (is|was|are|were) your|share|elaborate|anlat|açıkla|neden", re.I)
 YEARS_RE = re.compile(r"how many years|years of|yıl|ile lat|wie viele jahre|combien d.ann|cuántos años", re.I)
+EXPERIENCE_RE = re.compile(r"experience|deneyim|tecrübe|erfahrung|expérience|experiencia|doświadczen", re.I)
+SENSITIVE_RE = re.compile(
+    r"sponsor|visa|authori[sz]|legally|citizen|right to work|work permit|convict|criminal|fraud|felon|"
+    r"\bagree\b|consent|privacy|\bterms\b|acknowledge|certif|attest|\bconfirm\b|"
+    r"bachelor|degree|education|student|enroll|relocat|commut|on-?site|hybrid|\boffice\b|"
+    r"start date|when can you start|available to start", re.I)
+NARRATIVE_RE = re.compile(
+    r"^\s*(describe|explain|tell (us|me)|why\b|how (do|did|would|have|will) you|"
+    r"share\b|elaborate|anlat|açıkla|neden)", re.I)
 
 QUESTION_JS = r"""el => {
   const t = s => (s || '').replace(/\s+/g, ' ').trim();
   if (el.id) {
     const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (l && t(l.innerText) && el.type !== 'radio' && el.type !== 'checkbox') return t(l.innerText);
+    if (l && t(l.innerText) && el.type !== 'radio') return t(l.innerText);
   }
   const lb = el.getAttribute('aria-labelledby');
   if (lb) {
@@ -215,26 +222,32 @@ def answer(question: str, numeric: bool = False) -> list[str]:
     """Soruya verilecek aday cevaplar (ilk eşleşen kural)."""
     q = question.lower()
     result: list[str] = []
+    # Exact, user-confirmed answers take precedence over generic regex rules.
+    confirmed = CFG.get("confirmed_answers", {})
+    exact = next((v for k, v in confirmed.items() if k.strip().casefold() == question.strip().casefold()), None)
+    if exact is not None:
+        values = exact if isinstance(exact, list) else [exact]
+        result = [str(v) for v in values if v is not None and str(v).strip()]
+        return [v for v in result if re.fullmatch(r"\d+(?:\.\d+)?", v)] if numeric else result
+    if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
+        return []
     for rule in CFG["answers"]:
         if re.search(rule["match"], q):
             ans = rule["answer"]
             result = [str(a) for a in (ans if isinstance(ans, list) else [ans])]
             break
-    if not result and (numeric or YEARS_RE.search(q)):
+    if not result and (YEARS_RE.search(q) or EXPERIENCE_RE.search(q)):
         for pattern, years in CFG["skill_years"].items():
-            if re.search(pattern, q):
+            if re.search(rf"(?<!\w)(?:{pattern})(?!\w)", q):
                 result = [str(years)]
                 break
-        else:
-            result = [str(PROFILE["default_years"])]
     if "__SALARY__" in result:
         result = [salary_answer(q)]
     if "__ENGLISH__" in result:
-        result = ENGLISH_LEVELS[SETTINGS["english"]][1]
+        result = ENGLISH_LEVELS.get(SETTINGS.get("english"), ("", []))[1]
     result = [v for v in map(placeholder, result) if v]
     if numeric:
-        nums = [re.sub(r"[^\d.]", "", a) for a in result]
-        result = [n for n in nums if n] or [str(PROFILE["default_years"])]
+        result = [a for a in result if re.fullmatch(r"\d+(?:\.\d+)?", a)]
     return result
 
 
@@ -303,7 +316,10 @@ def placeholder(a: str) -> str:
     if not m:
         return a
     key = m.group(1).lower()
-    return str(SETTINGS.get(key) or PROFILE.get(key) or "")
+    value = SETTINGS.get(key)
+    if value is None or value == "":
+        value = PROFILE.get(key, "")
+    return str(value) if value is not None else ""
 
 
 def year_range(option: str) -> tuple[float, float] | None:
@@ -324,15 +340,34 @@ def year_range(option: str) -> tuple[float, float] | None:
 
 
 def choose_years(years: float, opts: list[tuple[int, str]]) -> int | None:
-    """Yıl aralıklı seçeneklerden (en az yarısı aralıksa) sayının düştüğünü, yoksa en yakınını seç."""
+    """Yalnızca doğrulanmış yıl sayısını içeren bir aralık seç; en yakınını tahmin etme."""
     ranges = [(i, year_range(o)) for i, o in opts]
     ranges = [(i, r) for i, r in ranges if r]
     if len(ranges) < max(2, len(opts) // 2):
         return None
-    inside = [i for i, (lo, hi) in ranges if lo <= years <= hi or (lo <= years < hi)]
-    if inside:
-        return inside[-1]
-    return min(ranges, key=lambda x: min(abs(years - x[1][0]), abs(years - x[1][1])))[0]
+    inside = []
+    for i, (lo, hi) in ranges:
+        text = dict(opts)[i].lower()
+        lower = years > lo if re.search(r"more than|over|above|>|fazla", text) else years >= lo
+        upper = years < hi if re.search(r"less than|under|fewer than|<|az|below", text) else years <= hi
+        if lower and upper:
+            inside.append(i)
+    if len(inside) == 1:
+        return inside[0]
+    return None
+
+
+def match_option(candidates: list[str], options: list[str]) -> int | None:
+    """Only exact, unambiguous matches; 'No' must not match 'No experience'."""
+    def normalize(value: str) -> str:
+        return " ".join(value.split()).casefold()
+    for candidate in candidates:
+        matches = [i for i, option in enumerate(options)
+                   if option.strip() and not PLACEHOLDER_RE.search(option)
+                   and normalize(option) == normalize(candidate)]
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def choose_option(question: str, options: list[str]) -> int | None:
@@ -340,20 +375,12 @@ def choose_option(question: str, options: list[str]) -> int | None:
     opts = [(i, o.strip()) for i, o in enumerate(options) if o.strip() and not PLACEHOLDER_RE.search(o)]
     if not opts:
         return None
-    if YEARS_RE.search(question) or re.search(r"experience|deneyim|tecrübe", question, re.I):
+    if YEARS_RE.search(question) or EXPERIENCE_RE.search(question):
         years = answer(question, numeric=True)
         idx = choose_years(float(years[0]), opts) if years else None
         if idx is not None:
             return idx
-    for cand in answer(question) + [PROFILE["default_yes_no"]]:
-        c = cand.lower()
-        for i, o in opts:
-            if o.lower() == c:
-                return i
-        for i, o in opts:
-            if c in o.lower():
-                return i
-    return opts[0][0]
+    return match_option(answer(question), options)
 
 
 def question_of(el: Locator) -> str:
@@ -391,30 +418,13 @@ RADIO_GROUP_JS = r"""fs => {
 }"""
 
 
-def fill_date(el: Locator) -> None:
-    """Başlangıç tarihi gibi takvim alanlarına 2 hafta sonrasını yaz; geçerli olan biçimi bul."""
-    d = dt.date.today() + dt.timedelta(days=14)
-    formats = ["%m/%d/%Y", "%d.%m.%Y", "%d/%m/%Y"]
-    if (el.get_attribute("lang") or "").startswith("tr"):
-        formats.insert(0, formats.pop(1))
-    for fmt in formats:
-        el.fill(d.strftime(fmt))
-        el.press("Tab")
-        pause(0.4, 0.8)
-        if el.get_attribute("aria-invalid") != "true":
-            return
-    log("    ! tarih alanı doldurulamadı")
-
-
 def fill_radios(scope: Locator) -> list[str]:
     """Radyo butonlu sorular; cevaplanamayanları döndürür. Yeni LinkedIn formunda
     seçenekler div[role=radio] ve <label> boş; eski formda <legend> + <label for>."""
     unanswered: list[str] = []
-    # İç içe gruplar iki kez gelebilir; ikincisi zaten seçili olduğu için atlanır
-    for fs in scope.locator("fieldset:has(input[type='radio']), [role='radiogroup']").all():
+    # Preselected options also need a confirmed matching answer.
+    for fs in scope.locator("fieldset:has(input[type='radio']):visible, [role='radiogroup']:visible").all():
         try:
-            if fs.locator("input[type='radio']:checked, [role='radio'][aria-checked='true']").count():
-                continue
             q, labels = fs.evaluate(RADIO_GROUP_JS)
             idx = choose_option(q, labels)
             if idx is None:
@@ -436,7 +446,10 @@ def fill_radios(scope: Locator) -> list[str]:
                     radio.check(force=True)
             pause(0.3, 0.7)
         except Exception as e:
+            if browser_closed(e):
+                raise BrowserClosed() from None
             log(f"    ! radio doldurulamadı: {e.__class__.__name__}")
+            unanswered.append(question_of(fs) or "radio group")
     return unanswered
 
 
@@ -459,7 +472,9 @@ STANDARD_FIELDS = [
 def fill_combobox(page: Page, el: Locator, q: str) -> bool:
     """Greenhouse/Ashby'deki aranabilir açılır listeler (role=combobox)."""
     std = standard_answer(el, q)
-    cands = [std] if std else answer(q) + [PROFILE["default_yes_no"]]
+    cands = [std] if std else answer(q)
+    if not cands:
+        return False
     try:
         el.click()
         pause(0.5, 1)
@@ -471,11 +486,16 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
         if not texts:
             el.press("Escape")
             return False
-        idx = choose_option(q, texts) if not std else 0
-        opts.nth(idx or 0).click()
+        idx = choose_option(q, texts) if not std else match_option(cands, texts)
+        if idx is None:
+            el.press("Escape")
+            return False
+        opts.nth(idx).click()
         pause(0.3, 0.7)
         return True
     except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
         log(f"    ! liste doldurulamadı: {e.__class__.__name__}")
         return False
 
@@ -532,47 +552,52 @@ CHECKGROUP_JS = r"""root => {
 
 def fill_yesno(scope: Locator) -> list[str]:
     unanswered = []
-    for i, (q, picked) in enumerate(scope.evaluate(YESNO_JS)):
-        if picked:
-            continue
+    for i, (q, _picked) in enumerate(scope.evaluate(YESNO_JS)):
         idx = choose_option(q, ["Yes", "No"])
+        if idx is None:
+            unanswered.append(q or "Yes/No question")
+            continue
         try:
-            scope.locator(f"[data-yesno='{i}'] button").nth(idx or 0).click()
+            scope.locator(f"[data-yesno='{i}'] button").nth(idx).click()
             pause(0.3, 0.6)
         except Exception:
             unanswered.append(q)
     return unanswered
 
 
-def fill_checkgroups(scope: Locator) -> None:
-    """Çoklu seçimde config'teki kurala, yoksa skill_years'taki becerilere uyan seçenekleri işaretler."""
-    for i, (q, opts, any_checked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
-        if any_checked:
+def fill_checkgroups(scope: Locator) -> list[str]:
+    """Select only explicitly configured options; unknown groups need manual review."""
+    unanswered = []
+    for i, (q, opts, _any_checked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
+        cands = answer(q)
+        pick = [j for c in cands if (j := match_option([c], opts)) is not None]
+        if not pick:
+            unanswered.append(q or "checkbox group")
             continue
-        cands = [c.lower() for c in answer(q)]
-        pick = [j for j, o in enumerate(opts) if any(c and c in o.lower() for c in cands)]
-        if not pick:
-            pick = [j for j, o in enumerate(opts)
-                    if any(re.search(pat, o.lower()) for pat in CFG["skill_years"])]
-        if not pick:
-            pick = [j for j, o in enumerate(opts) if not re.search(r"none|other|hiçbiri|diğer", o, re.I)][:1]
         cbs = scope.locator(f"[data-checkgroup='{i}'] input[type='checkbox']")
-        for j in pick:
+        for j in range(len(opts)):
             try:
                 cb = cbs.nth(j)
+                wanted = j in pick
+                if cb.is_checked() == wanted:
+                    continue
                 row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
                 try:
                     row.click(timeout=4000)
                 except PWTimeout:
-                    cb.check(force=True)
-                if not cb.is_checked():
-                    cb.check(force=True)
+                    cb.set_checked(wanted, force=True)
+                if cb.is_checked() != wanted:
+                    cb.set_checked(wanted, force=True)
             except Exception as e:
                 log(f"    ! onay kutusu seçilemedi: {e.__class__.__name__}")
+                unanswered.append(q or "checkbox group")
+    return unanswered
 
 
 def standard_answer(el: Locator, q: str) -> str | None:
     """Dış sitelerdeki ad/e-posta/telefon gibi standart alanlar."""
+    if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
+        return None
     key = " ".join([q, el.get_attribute("name") or "", el.get_attribute("id") or "",
                     el.get_attribute("autocomplete") or ""]).lower()
     for pattern, field in STANDARD_FIELDS:
@@ -587,7 +612,8 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     # Metin alanları
     fields = modal.locator(
         "input[type='text']:visible, input[type='tel']:visible, input[type='email']:visible, "
-        "input[type='number']:visible, input[type='url']:visible, input:not([type]):visible, textarea:visible"
+        "input[type='number']:visible, input[type='url']:visible, input[type='date']:visible, "
+        "input:not([type]):visible, textarea:visible"
     )
     for el in fields.all():
         try:
@@ -595,9 +621,6 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                 continue
             invalid = el.get_attribute("aria-invalid") == "true"
             if el.input_value().strip() and not invalid:
-                continue
-            if el.get_attribute("data-testid") == "date-picker-input":
-                fill_date(el)
                 continue
             q = question_of(el)
             if external and el.get_attribute("role") == "combobox":
@@ -612,23 +635,20 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             numeric = el.get_attribute("type") == "number" or "numeric" in (el.get_attribute("id") or "")
             # Dolu ama geçersiz alan genelde sayı bekliyor
             cands = answer(q, numeric=numeric or invalid)
-            if not cands and OPEN_QUESTION_RE.search(q):
-                # Açık uçlu soru: uzun metin alan alanlara ön yazıyı yaz
-                maxlen = int(el.get_attribute("maxlength") or 0)
-                is_long = el.evaluate("e => e.tagName") == "TEXTAREA" or not maxlen or maxlen >= len(PROFILE["cover_letter"])
-                if is_long:
-                    log(f"    ~ ön yazı ile cevaplandı: {q[:80]}")
-                    cands = [PROFILE["cover_letter"]]
             if not cands:
                 log(f"    ? cevapsız soru: {q[:90]}")
                 unanswered.append(q)
                 continue
             el.fill(cands[0])
             pause(0.6, 1.2)
-            # Şehir gibi typeahead alanlarında ilk öneriyi seç
-            sugg = page.locator("[role='listbox'] [role='option']:visible").first
+            # Never select the first typeahead suggestion without a matching answer.
+            sugg = page.locator("[role='listbox'] [role='option']:visible")
             if sugg.count():
-                sugg.click()
+                idx = match_option(cands, sugg.all_inner_texts())
+                if idx is None:
+                    unanswered.append(q)
+                else:
+                    sugg.nth(idx).click()
         except Exception as e:
             if browser_closed(e):
                 raise BrowserClosed() from None
@@ -637,36 +657,43 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             except Exception:
                 q = "?"
             log(f"    ! alan doldurulamadı, atlandı ({e.__class__.__name__}): {q}")
+            unanswered.append(q or "text field")
 
     # Açılır listeler
     for sel in modal.locator("select:visible").all():
         try:
-            current = sel.evaluate("s => s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : ''")
-            value = sel.input_value()
-            if current.strip() and value and not PLACEHOLDER_RE.search(current) and not PLACEHOLDER_RE.search(value):
-                continue
             options = sel.locator("option").all_inner_texts()
             idx = choose_option(question_of(sel), options)
             if idx is not None:
                 sel.select_option(index=idx)
+            else:
+                unanswered.append(question_of(sel) or "select")
         except Exception as e:
             log(f"    ! select doldurulamadı: {e.__class__.__name__}")
+            unanswered.append(question_of(sel) or "select")
 
     unanswered += fill_radios(modal)
 
-    # Onay kutuları (şartları kabul et vb.)
-    for cb in modal.locator("input[type='checkbox']:not(:checked)").all():
-        q = question_of(cb).lower()
-        if re.search(r"agree|consent|terms|privacy|acknowledge|confirm", q):
-            try:
-                cb.check(force=True)
-            except Exception:
-                pass
+    unanswered += fill_checkgroups(modal)
+    # Consent and attestations require an explicit question-specific rule.
+    for cb in modal.locator("input[type='checkbox']:visible").all():
+        if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
+            continue
+        if cb.get_attribute("id") == "follow-company-checkbox":
+            continue
+        q = question_of(cb)
+        idx = choose_option(q, ["Yes", "No"])
+        if idx is None:
+            unanswered.append(q or "checkbox")
+            continue
+        try:
+            cb.set_checked(idx == 0)
+        except Exception:
+            unanswered.append(q or "checkbox")
 
     resume = HOME / PROFILE["resume_file"]
     if external:
         unanswered += fill_yesno(modal)
-        fill_checkgroups(modal)
         # Dış sitelerde CV her zaman yüklenir; ön yazı dosyası alanları atlanır
         for fi in modal.locator("input[type='file']").all():
             key = (question_of(fi) + " " + (fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")).lower()
@@ -678,6 +705,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     pause(2, 3)
                 except Exception as e:
                     log(f"    ! CV yüklenemedi: {e.__class__.__name__}")
+                    unanswered.append("resume upload")
         return unanswered
 
     # CV: başta seçilen dosya LinkedIn'de listede yoksa yükle (yüklenen otomatik seçilir)
@@ -687,7 +715,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                 modal.locator("input[type='file']").first.set_input_files(str(resume))
                 pause(2, 3)
             except Exception:
-                pass
+                unanswered.append("resume upload")
     return unanswered
 
 
@@ -714,7 +742,7 @@ def discard(page: Page) -> None:
     pause(1, 2)
 
 
-def apply_to_job(page: Page, job_id: str) -> str:
+def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "") -> str:
     btn = page.get_by_role("button", name=EASY_APPLY_RE).first
     if not btn.count():
         return "no_easy_apply"
@@ -730,7 +758,10 @@ def apply_to_job(page: Page, job_id: str) -> str:
 
     for _ in range(15):
         pause(1, 2)
-        fill_step(page, modal)
+        unanswered = fill_step(page, modal)
+        if require_manual_review(page, modal, unanswered, job_id, title, company):
+            discard(page)
+            return "manual_review"
         follow = modal.locator("input#follow-company-checkbox:checked")
         if follow.count():
             modal.locator("label[for='follow-company-checkbox']").click()
@@ -756,7 +787,10 @@ def apply_to_job(page: Page, job_id: str) -> str:
         primary.click()
         pause(1.5, 3)
         if has_errors(modal) or modal.inner_text() == before:
-            fill_step(page, modal)  # bir kez daha dene
+            unanswered = fill_step(page, modal)  # bir kez daha dene
+            if require_manual_review(page, modal, unanswered, job_id, title, company):
+                discard(page)
+                return "manual_review"
             primary.click()
             pause(1.5, 3)
             if has_errors(modal) or modal.inner_text() == before:
@@ -772,10 +806,84 @@ def apply_to_job(page: Page, job_id: str) -> str:
 # ---------------------------------------------------------------- external (şirket sitesi)
 
 ATS = {
-    "greenhouse": re.compile(r"greenhouse\.io"),
-    "lever": re.compile(r"jobs\.(eu\.)?lever\.co"),
-    "ashby": re.compile(r"jobs\.ashbyhq\.com"),
+    "greenhouse": frozenset({"boards.greenhouse.io", "boards.eu.greenhouse.io",
+                             "job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"}),
+    "lever": frozenset({"jobs.lever.co", "jobs.eu.lever.co"}),
+    "ashby": frozenset({"jobs.ashbyhq.com"}),
 }
+
+
+class UntrustedApplicationSite(Exception):
+    """The application left its approved ATS document or has an unsafe target."""
+
+
+def safe_https_url(url: str) -> bool:
+    """Reject URLs whose interpretation could differ between Python and Chrome."""
+    if not isinstance(url, str) or not url or "\\" in url or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return False
+    try:
+        parsed = urlparse(url)
+        return (parsed.scheme == "https" and bool(parsed.hostname)
+                and parsed.username is None and parsed.password is None
+                and parsed.port in (None, 443))
+    except ValueError:
+        return False
+
+
+def ats_provider(url: str) -> str | None:
+    """Only exact, approved HTTPS hostnames identify an ATS, never paths/queries."""
+    if not safe_https_url(url):
+        return None
+    host = urlparse(url).hostname
+    return next((name for name, hosts in ATS.items() if host in hosts), None)
+
+
+def trusted_ats_document(page: Page, ats: str) -> Locator:
+    """Bind all data-entry locators to one verified document, not future navigations.
+
+    Checking page.url alone is racy: Playwright can wait for an element on a new,
+    untrusted page. A random document marker prevents that selector from matching.
+    """
+    url = page.url
+    if ats_provider(url) != ats:
+        raise UntrustedApplicationSite("untrusted_redirect")
+    token = secrets.token_hex(16)
+    try:
+        marked = page.evaluate("""({url, token}) => {
+            if (window.location.href !== url) return false;
+            document.documentElement.setAttribute('data-autoapply-document', token);
+            return true;
+        }""", {"url": url, "token": token})
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        raise UntrustedApplicationSite("cannot_verify_document") from e
+    if marked is not True:
+        raise UntrustedApplicationSite("document_changed")
+    return page.locator(f'html[data-autoapply-document="{token}"]')
+
+
+def check_ats_form(page: Page, document: Locator, form: Locator, ats: str) -> None:
+    if ats_provider(page.url) != ats or document.count() != 1:
+        raise UntrustedApplicationSite("document_changed_or_untrusted_redirect")
+    # Check native form targets, including submitter overrides and controls whose
+    # form= attribute references a different form. JS API requests remain ATS code.
+    try:
+        targets = form.evaluate("""root => {
+            const controls = [...root.querySelectorAll('input, button, select, textarea')];
+            const forms = new Set(root.matches('form') ? [root] : root.querySelectorAll('form'));
+            for (const el of controls) if (el.form) forms.add(el.form);
+            return [...forms].map(f => f.action || window.location.href).concat(
+                controls.filter(e => e.hasAttribute('formaction')).map(e => e.formAction));
+        }""")
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        raise UntrustedApplicationSite("cannot_verify_form_targets") from e
+    if any(ats_provider(target) != ats for target in targets):
+        raise UntrustedApplicationSite("untrusted_form_target")
+
+
 APPLY_BTN_RE = re.compile(r"\bapply\b|başvur", re.I)
 SUBMIT_RE = re.compile(r"submit|send application|apply|başvur|gönder", re.I)
 DONE_RE = re.compile(
@@ -791,6 +899,42 @@ def record_manual(job_id: str, title: str, company: str, url: str, reason: str) 
         if new_file:
             w.writerow(["date", "job_id", "title", "company", "reason", "apply_url"])
         w.writerow([dt.date.today().isoformat(), job_id, title, company, reason, url])
+
+
+def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_id: str,
+                          title: str, company: str, url: str = "") -> bool:
+    """Fail closed before advancing/submitting, including when form inspection fails.
+
+    Unknown questions are conservative: even optional ones block unless already filled.
+    Native validation also catches unsupported required fields and failed file uploads.
+    """
+    issues = list(unanswered)
+    try:
+        issues += form.locator(
+            "input, textarea, select, [aria-required='true']:visible"
+        ).evaluate_all(r"""els => els.filter(e => {
+            if (e.disabled || e.readOnly || e.type === 'hidden') return false;
+            if (e.validity && !e.validity.valid) return true;
+            if (e.getAttribute('aria-invalid') === 'true') return true;
+            if (e.getAttribute('aria-required') !== 'true') return false;
+            if (e.type === 'checkbox' || e.type === 'radio') return !e.checked;
+            if (e.type === 'file') return !e.files.length;
+            if (e.getAttribute('role') === 'radiogroup')
+                return !e.querySelector('[aria-checked="true"], input:checked');
+            if ('value' in e) return !e.value.trim();
+            return !e.getAttribute('aria-valuetext');
+        }).map(e => e.getAttribute('aria-label') || e.name || e.id || 'invalid required field')""")
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        issues.append("form inspection failed")
+    if not issues:
+        return False
+    issues = list(dict.fromkeys(q or "unknown question" for q in issues))
+    log("  ? manual review: " + " | ".join(issues)[:300])
+    screenshot(page, f"{job_id.replace(':', '_')}_manual_review")
+    record_manual(job_id, title, company, url or page.url, "unanswered: " + " | ".join(issues)[:300])
+    return True
 
 
 def external_url(page: Page) -> str | None:
@@ -831,30 +975,36 @@ def follow_apply(page: Page, btn: Locator) -> str | None:
 
 def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
     """Başvuru formunun doğrudan adresi ve ATS adı. Şirket sitesine gömülü formları da bulur."""
-    for name, rx in ATS.items():
-        if rx.search(url):
-            break
-    else:
+    name = ats_provider(url)
+    if not name:
+        if not safe_https_url(url):
+            return None, "unknown"
         # Şirket sitesine gömülü Greenhouse/Ashby/Lever iframe'i
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             pause(3, 4)
         except Exception:
             return None, "unknown"
-        for fr in page.frames:
-            for name, rx in ATS.items():
-                if rx.search(fr.url):
+        if not safe_https_url(page.url):
+            return None, "unknown"
+        name = ats_provider(page.url)
+        if name:
+            url = page.url
+        else:
+            for fr in page.frames:
+                name = ats_provider(fr.url)
+                if name:
                     url = fr.url
                     break
             else:
-                continue
-            break
-        else:
-            return None, "unknown"
-    if name == "lever" and not re.search(r"/apply/?(\?|$)", url):
-        url = re.sub(r"/?(\?.*)?$", r"/apply\1", url, count=1)
-    elif name == "ashby" and "/application" not in url:
-        url = re.sub(r"/?(\?.*)?$", r"/application\1", url, count=1)
+                return None, "unknown"
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if name == "lever" and not path.endswith("/apply"):
+        path += "/apply"
+    elif name == "ashby" and not path.endswith("/application"):
+        path += "/application"
+    url = parsed._replace(path=path or "/").geturl()
     return url, name
 
 
@@ -889,25 +1039,33 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> s
     log(f"  -> {ats}: {form_url[:90]}")
     page.goto(form_url, wait_until="domcontentloaded", timeout=30000)
     pause(3, 5)
+    try:
+        return apply_trusted_form(page, job_id, title, company, form_url, ats)
+    except UntrustedApplicationSite as e:
+        log(f"  ! untrusted application site: {e}")
+        record_manual(job_id, title, company, url, str(e))
+        return "external_manual"
+
+
+def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_url: str, ats: str) -> str:
+    document = trusted_ats_document(page, ats)
     if ats == "ashby":
-        tab = page.get_by_role("tab", name=re.compile(r"application", re.I))
+        tab = document.get_by_role("tab", name=re.compile(r"application", re.I))
         if tab.count():
             tab.first.click()
             pause(1.5, 2.5)
-    form = page.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
+    form = document.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
     if not form.count():
-        form = page.locator("body")
+        form = document.locator("body")
 
+    check_ats_form(page, document, form, ats)
     unanswered = fill_step(page, form, external=True)
     pause(1, 2)
-    unanswered = fill_step(page, form, external=True)  # açılan koşullu sorular için ikinci tur
-    required_empty = form.locator(
-        "input[required]:visible, textarea[required]:visible, [aria-required='true']:visible"
-    ).evaluate_all("els => els.filter(e => 'value' in e && !e.value.trim() && e.type !== 'file').length")
-    if unanswered and required_empty:
-        screenshot(page, f"{job_id}_ext_unanswered")
-        record_manual(job_id, title, company, form_url, "unanswered: " + " | ".join(unanswered)[:300])
-        return "external_unanswered"
+    check_ats_form(page, document, form, ats)
+    unanswered += fill_step(page, form, external=True)  # açılan koşullu sorular için ikinci tur
+    check_ats_form(page, document, form, ats)
+    if require_manual_review(page, form, unanswered, job_id, title, company, form_url):
+        return "manual_review"
 
     submit = form.locator("button[type='submit']:visible, input[type='submit']:visible")
     if not submit.count():
@@ -920,6 +1078,7 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> s
         screenshot(page, f"{job_id}_ext_dryrun")
         return "dry_run"
 
+    check_ats_form(page, document, form, ats)
     submit.last.click()
     for _ in range(25):
         time.sleep(1)
@@ -1202,7 +1361,6 @@ def apply_cv_profile(prof: dict) -> None:
         code = re.match(r"\+(\d{1,3})[\s-]", prof["phone_intl"])
         PROFILE["country_code"] = f"(+{code.group(1)})" if code else ""
     years = prof["total_years"]
-    PROFILE["default_years"] = max(1, min(years, 3))
     search = CFG["search"]
     search["keywords"] = prof["job_titles"]
     search["locations"] = SETTINGS.get("locations") or search["locations"]
@@ -1214,17 +1372,9 @@ def apply_cv_profile(prof: dict) -> None:
     roles = {re.findall(r"[\w+#]+", t.lower())[-1] for t in prof["job_titles"] if re.findall(r"[\w+#]+", t)}
     roles |= {"engineer", "developer", "scientist", "analyst", "architect", "researcher", "specialist", "lead"} & words
     CFG["filters"]["title_require"] = ["|".join(rf"\b{re.escape(w)}" for w in sorted(roles))] if roles else []
-    country = (PROFILE.get("country") or "").strip().lower()
-    if country:
-        names = "turkey|türkiye|turkiye" if country in ("turkey", "türkiye") else re.escape(country)
-        perm = r"authori[sz]ed|legally|permit|eligible|right to work"
-        CFG["answers"].insert(0, {"match": rf"({names}).*({perm})|({perm}).*({names})", "answer": "Yes"})
-    city = re.split(r"[,/]", PROFILE.get("city") or "")[0].strip().lower()
-    if city:
-        # Kendi şehrindeki ofise gidebilir: bu kural genel "on-site -> No" kuralından önce gelir
-        onsite = "commut|on-?site|office|hybrid"
-        CFG["answers"].insert(0, {"match": rf"({onsite}).*{re.escape(city)}|{re.escape(city)}.*({onsite})", "answer": "Yes"})
-    CFG["skill_years"] = {re.escape(x["skill"].lower()): x["years"] for x in prof["skills"]}
+    # Residence does not establish work authorization or willingness to commute.
+    # AI-estimated skill years are not shown for confirmation in the GUI.
+    # Keep only the user's explicit skill_years configuration, never CV estimates.
 
 
 # ---------------------------------------------------------------- main
@@ -1241,7 +1391,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             record(applied, job_id, title, company, reason)
             return False
         log(f"> {title} @ {company}")
-        status = apply_to_job(page, job_id)
+        status = apply_to_job(page, job_id, title, company)
         if status == "no_easy_apply" and EXTERNAL:
             status = apply_external(page, job_id, title, company)
         log(f"  = {status}")
