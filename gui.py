@@ -333,12 +333,17 @@ const T = {
   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
-let lang = localStorage.lang || (navigator.language.startsWith("tr") ? "tr" : "en"), S = null, logFrom = 0, poll = null;
+const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);
+let lang = navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en", S = null, logFrom = 0, poll = null, uiClosed = false;
+try {
+  const saved = localStorage.getItem("lang");
+  if (validLanguage(saved)) lang = saved;
+} catch (_) {} // Storage may be disabled; the interface must still work.
 const $ = id => document.getElementById(id);
 const t = k => T[lang][k] || k;
 function render() {
   document.querySelectorAll("[data-t]").forEach(e => { if (e.id !== "cvname" || !S || !S.cv_name) e.textContent = t(e.dataset.t); });
-  document.querySelectorAll(".lang button").forEach(b => b.classList.toggle("on", b.dataset.l === lang));
+  document.querySelectorAll(".lang button[data-l]").forEach(b => b.classList.toggle("on", b.dataset.l === lang));
   const v = $("english").value;
   $("english").innerHTML = Object.entries(t("levels")).map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
   if (v) $("english").value = v;
@@ -411,18 +416,31 @@ $("start").onclick = async () => {
   logFrom = 0; $("log").textContent = ""; watch();
 };
 $("stop").onclick = () => api("/api/stop", {});
-$("quit").onclick = async () => { await api("/api/quit", {}); document.body.innerHTML = `<main><h1>Auto Apply</h1><p>${t("quit_done")}</p></main>`; };
+$("quit").onclick = async () => {
+  await api("/api/quit", {});
+  uiClosed = true; clearInterval(poll); poll = null;
+  document.body.innerHTML = `<main><h1>Auto Apply</h1><p>${t("quit_done")}</p></main>`;
+};
 $("results").onclick = () => api("/api/open", { folder: "data" });
 function watch() {
+  if (uiClosed) return;
   $("s4").classList.remove("hidden"); $("start").disabled = true; $("stop").classList.remove("hidden"); msg("m3", t("running"));
   clearInterval(poll);
   poll = setInterval(async () => {
-    const r = await api("/api/log?from=" + logFrom);
+    let r;
+    try { r = await api("/api/log?from=" + logFrom); }
+    catch (error) { if (uiClosed) return; throw error; }
+    if (uiClosed) return; // An in-flight response may arrive after the UI has closed.
     if (r.lines.length) { logFrom += r.lines.length; const l = $("log"); l.textContent += r.lines.join("\n") + "\n"; l.scrollTop = l.scrollHeight; }
     if (!r.running) { clearInterval(poll); $("start").disabled = false; $("stop").classList.add("hidden"); msg("m3", t("finished"), "ok"); }
   }, 1500);
 }
-document.querySelectorAll(".lang button").forEach(b => b.onclick = () => { lang = localStorage.lang = b.dataset.l; render(); });
+document.querySelectorAll(".lang button[data-l]").forEach(b => b.onclick = () => {
+  if (!validLanguage(b.dataset.l)) return;
+  lang = b.dataset.l;
+  try { localStorage.setItem("lang", lang); } catch (_) {}
+  render();
+});
 load();
 </script></body></html>
 """
