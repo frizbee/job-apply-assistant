@@ -29,29 +29,34 @@ PREFERRED = [
 SCHEMA = {
     "type": "object",
     "properties": {
-        "first_name": {"type": "string"},
-        "last_name": {"type": "string"},
-        "email": {"type": "string"},
-        "phone_intl": {"type": "string", "description": "With country code, e.g. +90 534 000 00 00; empty if missing"},
-        "city": {"type": "string", "description": "City, Country"},
-        "country": {"type": "string", "description": "Country name in English, e.g. Turkey"},
-        "linkedin": {"type": "string"},
-        "github": {"type": "string", "description": "GitHub or portfolio URL; empty if missing"},
-        "current_title": {"type": "string"},
-        "total_years": {"type": "integer", "description": "Total years of professional experience"},
-        "job_titles": {"type": "array", "items": {"type": "string"},
+        "first_name": {"type": "string", "maxLength": 200},
+        "last_name": {"type": "string", "maxLength": 200},
+        "email": {"type": "string", "maxLength": 320},
+        "phone_intl": {"type": "string", "maxLength": 100, "description": "With country code, e.g. +90 534 000 00 00; empty if missing"},
+        "city": {"type": "string", "maxLength": 200, "description": "City, Country"},
+        "country": {"type": "string", "maxLength": 200, "description": "Country name in English, e.g. Turkey"},
+        "linkedin": {"type": "string", "maxLength": 2048},
+        "github": {"type": "string", "maxLength": 2048, "description": "GitHub or portfolio URL; empty if missing"},
+        "current_title": {"type": "string", "maxLength": 200},
+        "total_years": {"type": "integer", "minimum": 0, "maximum": 80, "description": "Total years of professional experience; 0 if unknown"},
+        "job_titles": {"type": "array", "minItems": 1, "maxItems": 20,
+                       "items": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": r"\S"},
                        "description": "4-8 standard English job titles exactly as companies post them "
                                       "(e.g. 'Machine Learning Engineer'), best fit first; no 'Freelance', 'Mentor'"},
-        "title_keywords": {"type": "array", "items": {"type": "string"},
+        "title_keywords": {"type": "array", "maxItems": 50,
+                           "items": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S"},
                            "description": "5-15 lowercase words that appear in relevant job TITLES "
                                           "(e.g. 'engineer', 'machine learning', 'data'), not tools or technologies"},
         "skills": {
             "type": "array",
-            "items": {"type": "object", "properties": {"skill": {"type": "string"}, "years": {"type": "integer"}},
+            "maxItems": 100,
+            "items": {"type": "object", "properties": {
+                "skill": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": r"\S"},
+                "years": {"type": "integer", "minimum": 0, "maximum": 80}},
                       "required": ["skill", "years"], "additionalProperties": False},
             "description": "8-20 technologies/skills with years of experience",
         },
-        "cover_letter": {"type": "string",
+        "cover_letter": {"type": "string", "maxLength": 10000,
                          "description": "3-5 sentence generic English cover letter, first person, no company name"},
     },
     "required": ["first_name", "last_name", "email", "phone_intl", "city", "country", "linkedin", "github",
@@ -61,8 +66,9 @@ SCHEMA = {
 
 PROMPT = (
     "The owner of this CV is looking for jobs. Extract their application profile from the CV below. "
-    "Pick job titles that match their real experience, do not exaggerate. If information is missing, "
-    "leave the field empty; never invent it. Reply with a single JSON object matching this schema, "
+    "Pick job titles that match their real experience, do not exaggerate. For missing information use "
+    "empty strings for text, empty lists for skills/keywords, and 0 for unknown experience; never invent it. "
+    "Reply with a single JSON object matching this schema, "
     "no other text:\n{schema}\n\nCV:\n{cv}"
 )
 
@@ -102,13 +108,81 @@ def free_models(key: str) -> list[tuple[str, bool]]:
     return [(m, free[m]) for m in ordered]
 
 
+class ProfileValidationError(ValueError):
+    """Invalid profile; messages identify field paths without echoing personal data."""
+
+
 def parse_json(text: str) -> dict:
-    m = re.search(r"\{.*\}", text, re.S)
-    return json.loads(m.group(0) if m else text)
+    if not isinstance(text, str):
+        raise ProfileValidationError("response: expected JSON text")
+    text = text.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.I)
+    if fence:
+        text = fence[1]
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ProfileValidationError("response: duplicate JSON field")
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ProfileValidationError("response: non-finite JSON number")
+    prof = json.loads(text, object_pairs_hook=pairs, parse_constant=invalid_constant)
+    if not isinstance(prof, dict):
+        raise ProfileValidationError("profile: expected object")
+    return prof
 
 
-def valid(prof: dict) -> bool:
-    return all(k in prof for k in SCHEMA["required"]) and prof["job_titles"] and isinstance(prof["skills"], list)
+def _validate_value(value, schema: dict, path: str) -> None:
+    """Validate the JSON Schema vocabulary used by SCHEMA, also for non-structured models."""
+    kind = schema["type"]
+    correct = {"object": isinstance(value, dict), "array": isinstance(value, list),
+               "string": isinstance(value, str), "integer": type(value) is int}
+    if not correct[kind]:
+        raise ProfileValidationError(f"{path}: expected {kind}")
+    if kind == "object":
+        for key in schema.get("required", []):
+            if key not in value:
+                raise ProfileValidationError(f"{path}.{key}: required field missing")
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+            raise ProfileValidationError(f"{path}: unexpected field")
+        for key, rule in properties.items():
+            if key in value:
+                _validate_value(value[key], rule, f"{path}.{key}")
+    elif kind == "array":
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", float("inf")):
+            raise ProfileValidationError(f"{path}: expected {schema.get('minItems', 0)} to {schema['maxItems']} items")
+        for i, item in enumerate(value):
+            _validate_value(item, schema["items"], f"{path}[{i}]")
+    elif kind == "string":
+        if len(value) < schema.get("minLength", 0) or len(value) > schema.get("maxLength", float("inf")):
+            raise ProfileValidationError(f"{path}: text length must be {schema.get('minLength', 0)} to {schema['maxLength']}")
+        if "pattern" in schema and not re.search(schema["pattern"], value):
+            raise ProfileValidationError(f"{path}: text must not be blank")
+    elif kind == "integer":
+        if value < schema.get("minimum", -float("inf")) or value > schema.get("maximum", float("inf")):
+            raise ProfileValidationError(f"{path}: must be between {schema['minimum']} and {schema['maximum']}")
+
+
+def validate(prof) -> dict:
+    _validate_value(prof, SCHEMA, "profile")
+    return prof
+
+
+def empty_profile() -> dict:
+    """Transport defaults for manual entry; job_titles still must be supplied."""
+    return {key: "" if rule["type"] == "string" else [] if rule["type"] == "array" else 0
+            for key, rule in SCHEMA["properties"].items()}
+
+
+def valid(prof) -> bool:
+    try:
+        validate(prof)
+    except ProfileValidationError:
+        return False
+    return True
 
 
 def extract(path: Path, key: str, log=print) -> dict:
@@ -126,13 +200,12 @@ def extract(path: Path, key: str, log=print) -> dict:
         try:
             resp = request("/chat/completions", key, body)
             prof = parse_json(resp["choices"][0]["message"]["content"] or "")
-            if valid(prof):
-                prof["total_years"] = int(prof.get("total_years") or 0)
-                return prof
-            errors.append(f"{model}: eksik alan")
+            return validate(prof)
         except urllib.error.HTTPError as e:
             errors.append(f"{model}: HTTP {e.code}")  # 429 = ücretsiz kota doldu, sonraki modele geç
-        except (KeyError, IndexError, ValueError, TimeoutError, urllib.error.URLError) as e:
+        except ProfileValidationError as e:
+            errors.append(f"{model}: {e}")
+        except (KeyError, IndexError, TypeError, ValueError, TimeoutError, urllib.error.URLError) as e:
             errors.append(f"{model}: {e.__class__.__name__}")
         log(f"  {errors[-1]}, başka ücretsiz model deneniyor...")
     raise RuntimeError("; ".join(errors))

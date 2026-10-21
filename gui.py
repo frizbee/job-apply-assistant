@@ -37,10 +37,17 @@ def open_folder(path: Path) -> None:
 
 def state() -> dict:
     s = apply.SETTINGS
+    prof, profile_error = s.get("cv_profile"), ""
+    if prof is not None:
+        try:
+            cv_profile.validate(prof)
+        except cv_profile.ProfileValidationError as e:
+            prof, profile_error = None, str(e)
     return {
         "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode")},
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
-        "profile": s.get("cv_profile"),
+        "profile": prof,
+        "profile_error": profile_error,
         "has_key": bool(apply.find_key()),
         "english_levels": {k: v[0] for k, v in apply.ENGLISH_LEVELS.items()},
         "default_locations": apply.CFG["search"]["locations"],
@@ -86,6 +93,7 @@ def analyze(body: dict) -> dict:
     STATE["analyzing"] = True
     try:
         prof = cv_profile.extract(resume, key, log=apply.log)
+        cv_profile.validate(prof)
     except Exception as e:
         return {"error": "analyze_failed", "detail": f"{e.__class__.__name__}: {str(e)[:200]}"}
     finally:
@@ -101,13 +109,26 @@ def start(body: dict) -> dict:
     s = apply.SETTINGS
     if not Path(s.get("resume") or "missing").is_file():
         return {"error": "no_cv"}
-    prof = {**(s.get("cv_profile") or {"title_keywords": [], "skills": [], "cover_letter": ""}), **body["profile"]}
-    if not prof.get("job_titles"):
+    if not isinstance(body, dict) or not isinstance(body.get("profile"), dict):
+        return {"error": "invalid_profile", "detail": "profile: expected object"}
+    cached = s.get("cv_profile")
+    prof = {**cv_profile.empty_profile(), **(cached if cv_profile.valid(cached) else {}), **body["profile"]}
+    # The HTML experience input is text; only this transport field is normalized.
+    years = prof["total_years"]
+    if isinstance(years, str):
+        if not years.strip():
+            prof["total_years"] = 0
+        elif re.fullmatch(r"\d{1,2}", years.strip()):
+            prof["total_years"] = int(years.strip())
+    if prof.get("job_titles") == []:
         return {"error": "no_titles"}
+    try:
+        cv_profile.validate(prof)
+    except cv_profile.ProfileValidationError as e:
+        return {"error": "invalid_profile", "detail": str(e)}
     missing = [k for k in REQUIRED if not str(prof.get(k) or "").strip()]
     if missing:
         return {"error": "missing", "fields": missing}
-    prof["total_years"] = int(prof.get("total_years") or 0)
     # Aylık beklentiler: kendi para birimi + EUR + USD. Yıllık "salary" diğer para birimlerine çevirmenin tabanı.
     cur = body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD"
     monthly = {}
@@ -308,7 +329,7 @@ const T = {
   err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
   change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
-  err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_no_titles:"Please enter at least one job title.", err_missing:"Please fill in the fields marked in red. Application forms always ask for them.", err_already_running:"Already running." },
+   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_invalid_profile:"Invalid profile. Check your details or read the CV again.", err_no_titles:"Please enter at least one job title.", err_missing:"Please fill in the fields marked in red. Application forms always ask for them.", err_already_running:"Already running." },
  tr: { step1:"Adım 1", cv_title:"CV'n", cv_hint:"CV'ni yükle (PDF veya Word). Ücretsiz bir yapay zeka modeli okuyup bilgilerini ve sana uygun pozisyonları çıkarır.",
   cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"Ücretsiz anahtarını al (bir kerelik, yaklaşık 1 dakika)",
   free_title:"Tamamen ücretsiz - hiçbir ücret ödemezsin.", free_text:"CV'n OpenRouter'daki ücretsiz bir yapay zeka modeliyle okunur. Uygulama sadece ücretsiz modelleri kullanır. Kredi kartı gerekmez, hiçbir şey satın almazsın.",
@@ -330,7 +351,7 @@ const T = {
   err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
-  err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
+   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_invalid_profile:"Geçersiz profil. Bilgilerini kontrol et veya CV'yi yeniden oku.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
 const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);
@@ -380,6 +401,7 @@ async function load() {
   $("sources").innerHTML = Object.entries(SOURCES).map(([k, v]) => `<label><input type="checkbox" value="${k}" ${on.includes(k) ? "checked" : ""}> ${v}</label>`).join("");
   $("test_mode").checked = st.test_mode ?? false;
   if (S.profile) fill(S.profile);
+  if (S.profile_error) err("m1", { error: "invalid_profile", detail: S.profile_error });
   if (S.running) watch();
   render();
 }

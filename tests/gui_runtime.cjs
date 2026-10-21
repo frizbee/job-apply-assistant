@@ -39,7 +39,7 @@ const localStorage = {
   setItem(key, value) { if (input.blockStorage) throw Error("Storage disabled"); stored = value; },
 };
 const state = { settings: {}, profile: null, cv_name: "", has_key: false,
-  default_locations: ["Worldwide"], running: input.running || false };
+  default_locations: ["Worldwide"], running: input.running || false, profile_error: input.profileError || "" };
 const context = vm.createContext({ document, localStorage, navigator: { language: input.navigator || "en-US" },
   async fetch(path, options) {
     requests.push({ path, ...options });
@@ -83,6 +83,6 @@ async function main() {
   }
   process.stdout.write(JSON.stringify({ before, lang: read("lang"), stored, requests, switched,
     quitText: quit.textContent, quitActive: quit.classList.contains("on"), body: body.innerHTML,
-    timers: timers.size, english: elements.get("english").value }));
+    timers: timers.size, english: elements.get("english").value, message: elements.get("m1").textContent }));
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

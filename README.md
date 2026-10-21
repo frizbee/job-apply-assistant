@@ -109,6 +109,7 @@ cd linkedin-auto-apply
 **Linux:** run `./install-linux.sh` once. It installs the Python packages and Google Chrome if missing (automatic on x86_64 Debian/Ubuntu/Fedora; may ask for your sudo password) and adds **Auto Apply** to the app menu. A desktop session is needed because the app opens a Chrome window.
 
 - **CV reading:** set `OPENROUTER_API_KEY` in `.env` (a free key from [openrouter.ai/keys](https://openrouter.ai/keys)). Only `:free` models are ever called.
+- **Profile validation:** AI output, GUI submissions and cached profiles are validated locally against the same schema before use. Experience must be an integer from 0 to 80; profiles allow 1–20 nonblank job titles, up to 50 keywords and up to 100 correctly structured skills. Invalid model output triggers the next free model; invalid saved profiles must be re-read or replaced by manual entry. Unknown optional text may be empty and unknown experience is represented as 0. Validation checks structure and bounds, not factual accuracy—review the extracted details yourself.
 - **Advanced settings** (sources, limits, form-answer rules) are in `config.yaml`.
 - **Sensitive answers:** visas, work authorization, qualifications, relocation and consent are not inferred from your CV or location. To confirm an answer, add the complete question and your answer to `confirmed_answers` in `config.yaml`, for example:
 

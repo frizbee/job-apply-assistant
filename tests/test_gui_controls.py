@@ -61,6 +61,12 @@ class GUIControlTests(unittest.TestCase):
         self.assertEqual(result["lang"], "tr")
         self.assertEqual(result["stored"], "tr")
 
+    def test_invalid_cached_profile_has_a_clear_message_in_both_languages(self):
+        for lang, message in [("en", "Invalid profile"), ("tr", "Geçersiz profil")]:
+            result = self.run_ui(saved=lang, profileError="profile.skills: expected array")
+            self.assertIn(message, result["message"])
+            self.assertIn("profile.skills", result["message"])
+
     def test_quit_cancels_polling_and_ignores_inflight_response(self):
         for scenario in ["quit-polling", "quit-polling-error"]:
             result = self.run_ui(scenario=scenario, running=True, saved="en")
@@ -85,6 +91,8 @@ class BrowserGUIControlTests(SafetyTest):
         self.addCleanup(self.context.close)
         self.page = self.context.new_page()
         self.errors, self.quit_requests = [], []
+        self.profile_error = ""
+        self.start_error = None
         self.page.on("pageerror", lambda error: self.errors.append(error))
         def respond(route):
             path = route.request.url.split("autoapply.test", 1)[-1]
@@ -92,7 +100,10 @@ class BrowserGUIControlTests(SafetyTest):
                 route.fulfill(content_type="text/html", body=PAGE)
             elif path == "/api/state":
                 route.fulfill(json={"settings": {}, "cv_name": "", "has_key": False,
-                                    "default_locations": ["Worldwide"], "profile": None, "running": False})
+                                    "default_locations": ["Worldwide"], "profile": None, "running": False,
+                                    "profile_error": self.profile_error})
+            elif path == "/api/start" and self.start_error:
+                route.fulfill(json=self.start_error)
             elif path == "/api/quit":
                 self.quit_requests.append(route.request)
                 route.fulfill(json={"ok": True})
@@ -122,4 +133,24 @@ class BrowserGUIControlTests(SafetyTest):
         self.assertEqual(self.page.locator("#quit").inner_text(), "Quit")
         self.page.locator('[data-l="tr"]').click()
         self.assertEqual(self.page.evaluate("localStorage.getItem('lang')"), "tr")
+        self.assertEqual(self.errors, [])
+
+    def test_invalid_cached_profile_message_is_visible_without_js_error(self):
+        self.profile_error = "profile.skills: expected array"
+        self.page.goto("http://autoapply.test/")
+        self.page.get_by_text("Invalid profile. Check your details or read the CV again.", exact=False).wait_for()
+        self.assertIn("profile.skills", self.page.locator("#m1").inner_text())
+        self.assertEqual(self.errors, [])
+
+    def test_invalid_profile_response_does_not_start_progress_or_disable_retry(self):
+        self.start_error = {"error": "invalid_profile", "detail": "profile.total_years: expected integer"}
+        self.page.goto("http://autoapply.test/")
+        self.page.wait_for_function("document.getElementById('english').value === '3'")
+        self.page.locator("#manual").click()
+        self.page.locator("#job_titles").fill("Software Engineer")
+        self.page.locator("#total_years").fill("not-a-number")
+        self.page.locator("#start").click()
+        self.page.locator("#m3").filter(has_text="profile.total_years").wait_for()
+        self.assertTrue(self.page.locator("#start").is_enabled())
+        self.assertFalse(self.page.locator("#s4").is_visible())
         self.assertEqual(self.errors, [])

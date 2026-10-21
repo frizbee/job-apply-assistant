@@ -1439,6 +1439,9 @@ def load_settings() -> dict:
 
 def finalize_settings() -> None:
     """Cevapları kaydeder ve profile/aramaya uygular (terminal ve arayüz ortak)."""
+    if SETTINGS.get("cv_profile") is not None:
+        from cv_profile import validate
+        validate(SETTINGS["cv_profile"])
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
@@ -1491,18 +1494,20 @@ def show_profile(prof: dict, locations: list[str]) -> None:
 
 def cv_setup() -> None:
     """CV'den profil çıkarır (aynı CV için önbellekten) ve kullanıcıya onaylatır."""
+    import cv_profile
     resume = Path(SETTINGS["resume"])
     digest = hashlib.sha256(resume.read_bytes()).hexdigest()
-    prof = SETTINGS.get("cv_profile") if SETTINGS.get("cv_hash") == digest else None
+    cached = SETTINGS.get("cv_profile") if SETTINGS.get("cv_hash") == digest else None
+    prof = dict(cached) if cv_profile.valid(cached) else None
     if not prof:
         key = api_key()
         if not key:
             SETTINGS.pop("cv_profile", None)
             return
         print("CV analiz ediliyor...")
-        import cv_profile
         try:
             prof = cv_profile.extract(resume, key, log=print)
+            cv_profile.validate(prof)
         except Exception as e:
             print(f"  ! CV analiz edilemedi ({e.__class__.__name__}: {str(e)[:150]}); config.yaml kullanılacak.")
             SETTINGS.pop("cv_profile", None)
@@ -1512,6 +1517,7 @@ def cv_setup() -> None:
         show_profile(prof, locations)
         choice = ask("Onaylıyor musun? e=evet, p=pozisyonları değiştir, u=ülkeleri değiştir, h=CV profilini kullanma", "e").lower()
         if choice == "e":
+            cv_profile.validate(prof)
             SETTINGS.update(cv_profile=prof, cv_hash=digest, locations=locations)
             return
         if choice == "h":
@@ -1519,9 +1525,15 @@ def cv_setup() -> None:
             return
         if choice == "p":
             raw = input("Pozisyonlar (virgülle ayır): ")
-            prof["job_titles"] = [t.strip() for t in raw.split(",") if t.strip()] or prof["job_titles"]
-            words = {w.lower() for t in prof["job_titles"] for w in re.findall(r"[\w+#]{3,}", t)}
-            prof["title_keywords"] = sorted(set(prof["title_keywords"]) | words)
+            candidate = dict(prof)
+            candidate["job_titles"] = [t.strip() for t in raw.split(",") if t.strip()] or prof["job_titles"]
+            words = {w.lower() for t in candidate["job_titles"] for w in re.findall(r"[\w+#]{3,}", t)}
+            candidate["title_keywords"] = sorted(set(prof["title_keywords"]) | words)
+            try:
+                cv_profile.validate(candidate)
+                prof = candidate
+            except cv_profile.ProfileValidationError as e:
+                print(f"  ! {e}")
         if choice == "u":
             raw = input("Ülkeler/bölgeler (virgülle ayır, ör. European Union, Türkiye): ")
             locations = [t.strip() for t in raw.split(",") if t.strip()] or locations
@@ -1529,15 +1541,17 @@ def cv_setup() -> None:
 
 def apply_cv_profile(prof: dict) -> None:
     """Onaylanan CV profilini arama ayarlarına, filtrelere ve form cevaplarına uygular."""
+    from cv_profile import validate
+    validate(prof)
     for k in ("first_name", "last_name", "email", "phone_intl", "city", "country", "current_title", "cover_letter"):
-        if prof.get(k):
-            PROFILE[k] = prof[k]
+        PROFILE[k] = prof[k]  # Empty validated fields must not retain another CV's answers.
     # Linkler CV'de yoksa config'deki başkasının linki kullanılmasın
     PROFILE.update(linkedin=prof["linkedin"], github=prof["github"], current_company="")
     for k in ("linkedin", "github"):
         if PROFILE[k] and not PROFILE[k].startswith("http"):
             PROFILE[k] = "https://" + PROFILE[k]
-    PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}"
+    PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}".strip()
+    PROFILE.update(phone="", country_code="")
     if prof.get("phone_intl"):
         # Ülke kodu ayrı sorulduğu için yerel numara: "+90 534 ..." -> "534..."
         PROFILE["phone"] = re.sub(r"\D", "", re.sub(r"^\+\d{1,3}[\s-]", "", prof["phone_intl"]))
@@ -1659,6 +1673,9 @@ def launch(pw):
 def run_bot() -> int:
     """Başlangıç bilgileri (SETTINGS) hazırken başvuruları yapar."""
     global DEADLINE
+    if SETTINGS.get("cv_profile") is not None:
+        from cv_profile import validate
+        validate(SETTINGS["cv_profile"])
     DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
     STOP.clear()
     applied = load_applied()
@@ -1692,8 +1709,13 @@ def run_bot() -> int:
 
 
 def main() -> int:
-    ask_settings()
-    return run_bot()
+    from cv_profile import ProfileValidationError
+    try:
+        ask_settings()
+        return run_bot()
+    except ProfileValidationError as e:
+        log(f"Invalid profile: {e}. Review your details or read the CV again.")
+        return 1
 
 
 if __name__ == "__main__":

@@ -90,7 +90,7 @@ class AnswerTests(SafetyTest):
         profile = {"first_name": "Test", "last_name": "User", "email": "test@example.com",
                    "phone_intl": "", "city": "Berlin", "country": "Germany", "linkedin": "", "github": "",
                    "current_title": "Developer", "total_years": 4, "job_titles": ["Software Engineer"],
-                   "title_keywords": ["software"], "skills": [{"skill": "Python", "years": 99}], "cover_letter": "Hello"}
+                   "title_keywords": ["software"], "skills": [{"skill": "Python", "years": 8}], "cover_letter": "Hello"}
         apply.CFG["skill_years"] = {"python": 3}
         previous = copy.deepcopy(apply.CFG["answers"])
         apply.apply_cv_profile(profile)
