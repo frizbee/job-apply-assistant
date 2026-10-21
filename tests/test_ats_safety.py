@@ -1,5 +1,7 @@
 """ATS URL and document-boundary regression tests; no external network requests."""
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -134,6 +136,19 @@ class ExternalBoundaryTests(SafetyTest):
         self.assertEqual(self.run_form(), "external_manual")
         self.fill.assert_not_called()
 
+    def test_spoofed_ats_path_without_real_iframe_is_manual_only(self):
+        self.page.frames = []
+        result = apply.apply_form(self.page, "test", "Engineer", "Example",
+                                  "https://evil.example/greenhouse.io/form")
+        self.assertEqual(result, "external_manual")
+        self.fill.assert_not_called()
+        self.form.click.assert_not_called()
+
+    def test_unknown_provider_cannot_authorize_an_untrusted_document(self):
+        self.page.url = "https://evil.example/form"
+        with self.assertRaises(apply.UntrustedApplicationSite):
+            apply.trusted_ats_document(self.page, None)
+
 
 @unittest.skipUnless(os.getenv("AUTOAPPLY_BROWSER_TESTS") == "1", "optional local Chrome DOM tests")
 class BrowserBoundaryTests(SafetyTest):
@@ -200,15 +215,44 @@ class BrowserBoundaryTests(SafetyTest):
                 apply.check_ats_form(self.page, document, form, "lever")
             element.evaluate("(e, attr) => e.removeAttribute(attr)", attr)
 
+    def test_control_referencing_another_form_cannot_bypass_target_check(self):
+        document, form = self.verified_form()
+        self.page.evaluate("""() => {
+            const other = document.createElement('form');
+            other.id = 'other';
+            other.action = 'https://evil.example/collect';
+            document.body.append(other);
+            document.querySelector('button').setAttribute('form', 'other');
+        }""")
+        with self.assertRaises(apply.UntrustedApplicationSite):
+            apply.check_ats_form(self.page, document, form, "lever")
+
     def test_http_redirect_is_checked_before_data_entry(self):
+        html = self.html.encode()
+        class LocalForm(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(html)
+
+            def log_message(self, *args):
+                pass
+
+        # Playwright routing only intercepts the first request in a redirect chain.
+        # Use a loopback server for the destination, never a public network host.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), LocalForm)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         self.context.unroute("**/*")
         def respond(route):
             if "jobs.lever.co" in route.request.url:
-                route.fulfill(status=302, headers={"Location": "https://evil.example/form"})
+                route.fulfill(status=302, headers={"Location": f"http://127.0.0.1:{server.server_port}/form"})
             else:
                 route.fulfill(content_type="text/html", body=self.html)
         self.context.route("**/*", respond)
-        self.page.goto("https://jobs.lever.co/company/id/apply")
+        self.page.goto("https://jobs.lever.co/company/id/apply", timeout=5000)
         with self.assertRaises(apply.UntrustedApplicationSite):
             apply.trusted_ats_document(self.page, "lever")
         self.assertEqual(self.page.locator("#email").input_value(), "")

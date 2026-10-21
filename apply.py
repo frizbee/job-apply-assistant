@@ -845,7 +845,7 @@ def trusted_ats_document(page: Page, ats: str) -> Locator:
     untrusted page. A random document marker prevents that selector from matching.
     """
     url = page.url
-    if ats_provider(url) != ats:
+    if ats not in ATS or ats_provider(url) != ats:
         raise UntrustedApplicationSite("untrusted_redirect")
     token = secrets.token_hex(16)
     try:
@@ -864,7 +864,7 @@ def trusted_ats_document(page: Page, ats: str) -> Locator:
 
 
 def check_ats_form(page: Page, document: Locator, form: Locator, ats: str) -> None:
-    if ats_provider(page.url) != ats or document.count() != 1:
+    if ats not in ATS or ats_provider(page.url) != ats or document.count() != 1:
         raise UntrustedApplicationSite("document_changed_or_untrusted_redirect")
     # Check native form targets, including submitter overrides and controls whose
     # form= attribute references a different form. JS API requests remain ATS code.
