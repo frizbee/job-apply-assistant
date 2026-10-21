@@ -193,7 +193,11 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
     btn = page.get_by_role("button", name=re.compile(r"^\s*apply( now)?\s*$", re.I)).first
     if not btn.count():
         return "already_applied_or_closed"
-    btn.click()
+    try:
+        core.click_form_control(btn)
+    except core.UnsafeFormControl:
+        core.record_manual(job["id"], job["title"], job["company"], job["url"], "submit-capable Apply opener")
+        return "manual_review"
     core.pause(3, 4)
     if len(ctx.pages) > before or not page.url.startswith("https://wellfound.com"):
         # Başvuru şirket sitesinde
@@ -260,7 +264,11 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
             page.get_by_role("link", name=re.compile(r"apply on company site", re.I)))
         return external(page, job, core.follow_apply(page, btn.first), "indeed.com", applied)
     ctx, before = page.context, len(page.context.pages)
-    easy.click()
+    try:
+        core.click_form_control(easy)
+    except core.UnsafeFormControl:
+        core.record_manual(job["id"], job["title"], job["company"], job["url"], "submit-capable Indeed opener")
+        return "manual_review"
     core.pause(4, 6)
     ap = ctx.pages[-1] if len(ctx.pages) > before else page
     for _ in range(15):
@@ -277,12 +285,12 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
         if core.require_manual_review(ap, scope, unanswered, job["id"], job["title"], job["company"], job["url"]):
             return "manual_review"
         primary = ap.get_by_role("button", name=re.compile(
-            r"^(continue|review your application|submit your application|devam|başvurunu gönder)", re.I)).last
+            r"^(next|continue|review|submit|send(?: your)? application|devam|[iİıI]leri|başvurunu gönder|gönder)", re.I)).last
         if not primary.count():
             core.screenshot(ap, f"{job['id'].replace(':', '_')}_nobutton")
             return "skipped_no_button"
-        text = primary.inner_text().lower()
-        if "submit" in text or "gönder" in text:
+        action = core.application_button_action(primary)
+        if action == "submit":
             if core.DRY_RUN:
                 core.screenshot(ap, f"{job['id'].replace(':', '_')}_dryrun")
                 return "dry_run"
@@ -290,8 +298,15 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
             expected_host = urlparse(ap.url).hostname
             return core.submit_application(ap, primary, job["id"], job["title"], job["company"], job["url"],
                 lambda: core.wait_application_submission(ap, before, checks=15, expected_host=expected_host), applied)
+        if action != "next":
+            core.require_manual_review(ap, scope, ["unrecognized application action"], job["id"], job["title"], job["company"], job["url"])
+            return "manual_review"
         before_url, before_text = ap.url, ap.locator("body").inner_text()[:3000]
-        primary.click()
+        try:
+            core.click_navigation(primary)
+        except core.UnsafeFormControl:
+            core.require_manual_review(ap, scope, ["submit-capable navigation control"], job["id"], job["title"], job["company"], job["url"])
+            return "manual_review"
         core.pause(2, 3)
         if ap.url == before_url and ap.locator("body").inner_text()[:3000] == before_text:
             core.screenshot(ap, f"{job['id'].replace(':', '_')}_unanswered")

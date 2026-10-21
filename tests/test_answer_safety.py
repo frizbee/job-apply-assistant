@@ -105,6 +105,8 @@ def node():
     n.first = n.last = n
     n.locator.return_value = n
     n.get_by_role.return_value = n
+    n.filter.return_value = n
+    n.and_.return_value = n
     n.all.return_value = []
     n.count.return_value = 1
     n.evaluate_all.return_value = []
@@ -126,6 +128,7 @@ class ControlTests(SafetyTest):
         apply.PROFILE["city"] = "Berlin, Germany"
         field = MagicMock()
         field.get_attribute.return_value = ""
+        field.evaluate.return_value = True
         page = MagicMock()
         page.locator.return_value.all_inner_texts.return_value = ["Berlin, New Hampshire"]
         self.assertFalse(apply.fill_combobox(page, field, "City"))
@@ -141,6 +144,7 @@ class ControlTests(SafetyTest):
         apply.CFG["confirmed_answers"] = {"Have you been convicted?": "No"}
         scope = MagicMock()
         scope.evaluate.return_value = [("Have you been convicted?", False)]
+        scope.locator.return_value.nth.return_value.evaluate.return_value = True
         self.assertEqual(apply.fill_yesno(scope), [])
         scope.locator.return_value.nth.assert_called_once_with(1)
 
@@ -183,6 +187,7 @@ class SubmissionGuardTests(SafetyTest):
         empty = node()
         empty.count.return_value = 0
         self.form.locator.side_effect = lambda selector: empty if selector == "input#follow-company-checkbox:checked" else self.form
+        self.form.evaluate.side_effect = lambda script, *args: True if script == apply.NON_SUBMITTING_CONTROL_JS else []
         self.page.locator.return_value = self.form
         self.page.get_by_role.return_value = self.form
         self.page.url = "https://wellfound.com/jobs/123"

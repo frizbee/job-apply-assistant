@@ -433,6 +433,57 @@ def question_of(el: Locator) -> str:
 
 # ---------------------------------------------------------------- form filling
 
+class UnsafeFormControl(ValueError):
+    """Only the explicit final-submit path may activate a native submit control."""
+
+
+UNSAFE_SUBMIT_SELECTOR = "button:not([type='button' i]), button[formaction], input[type='submit' i], input[type='image' i]"
+NON_SUBMITTING_CONTROL_JS = r"""el => {
+    const submits = e => e && ((e.tagName === 'BUTTON' && (e.type !== 'button' || e.hasAttribute('formaction')))
+        || (e.tagName === 'INPUT' && /^(submit|image)$/i.test(e.type)));
+    if (submits(el.closest('button, input'))) return false;
+    const label = el.closest('label');
+    if (label && submits(label.control)) return false;
+    return !el.querySelector("button:not([type='button' i]), button[formaction], input[type='submit' i], input[type='image' i]");
+}"""
+
+
+def click_form_control(control: Locator, timeout: int = 5000) -> None:
+    """Reject native submit actions during filling, in both test and live modes."""
+    if control.evaluate(NON_SUBMITTING_CONTROL_JS) is not True:
+        raise UnsafeFormControl("submit-capable control requires manual review")
+    # Keep the native-type restriction in the locator too: a later type change
+    # must not make a previously safe element silently become a submit button.
+    safe_selector = (f":not(:is({UNSAFE_SUBMIT_SELECTOR})):not(:is({UNSAFE_SUBMIT_SELECTOR}) *)"
+                     f":not(:has(:is({UNSAFE_SUBMIT_SELECTOR})))")
+    control.and_(control.page.locator(safe_selector)).click(timeout=timeout)
+
+
+NAVIGATION_BUTTON_RE = re.compile(
+    r"^\s*(?:next(?:\s+step)?|continue(?:\s+to\s+(?:the\s+)?(?:next\s+step|review(?:\s+your\s+application)?))?|"
+    r"review(?:\s+(?:your\s+)?application)?|devam(?:\s+et)?|[iİıI]leri|(?:başvuruyu\s+)?(?:[iİıI]ncele|gözden\s+geç[iİıI]r))\s*$", re.I)
+FINAL_BUTTON_RE = re.compile(
+    r"^\s*(?:submit(?:\s+(?:your\s+)?application)?|send\s+(?:your\s+)?application|"
+    r"(?:başvur(?:u|unu|uyu|unuzu)\s+)?gönder)\s*$", re.I)
+
+
+def application_button_action(button: Locator) -> str:
+    """Unknown or conflicting text/ARIA labels must never default to Next."""
+    labels = [label.strip() for label in (button.inner_text(), button.get_attribute("aria-label") or "") if label.strip()]
+    actions = {"submit" if FINAL_BUTTON_RE.fullmatch(label) else "next" if NAVIGATION_BUTTON_RE.fullmatch(label)
+               else "unknown" for label in labels}
+    return actions.pop() if len(actions) == 1 else "unknown"
+
+
+def click_navigation(button: Locator) -> None:
+    if application_button_action(button) != "next":
+        raise UnsafeFormControl("unrecognized navigation action")
+    navigation = button.and_(button.page.get_by_role("button", name=NAVIGATION_BUTTON_RE))
+    if button.inner_text().strip():
+        navigation = navigation.filter(has_text=NAVIGATION_BUTTON_RE)
+    click_form_control(navigation)
+
+
 RADIO_GROUP_JS = r"""fs => {
   const t = s => (s || '').replace(/\s+/g, ' ').trim();
   const lines = el => (el.innerText || '').split('\n').map(t).filter(Boolean);
@@ -474,13 +525,13 @@ def fill_radios(scope: Locator) -> list[str]:
                 continue
             items = fs.locator("[role='radio']")
             if items.count():
-                items.nth(idx).click()
+                click_form_control(items.nth(idx))
             else:
                 radio = fs.locator("input[type='radio']").nth(idx)
                 # Metni olan en yakın üst öğe = tıklanabilir seçenek satırı
                 row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
                 try:
-                    row.click(timeout=5000)
+                    click_form_control(row)
                 except PWTimeout:
                     radio.check(force=True)
                 if not fs.locator("input[type='radio']:checked").count():
@@ -517,7 +568,7 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
     if not cands:
         return False
     try:
-        el.click()
+        click_form_control(el)
         pause(0.5, 1)
         if std:
             el.fill(std.split(",")[0])
@@ -531,7 +582,7 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
         if idx is None:
             el.press("Escape")
             return False
-        opts.nth(idx).click()
+        click_form_control(opts.nth(idx))
         pause(0.3, 0.7)
         return True
     except Exception as e:
@@ -599,7 +650,7 @@ def fill_yesno(scope: Locator) -> list[str]:
             unanswered.append(q or "Yes/No question")
             continue
         try:
-            scope.locator(f"[data-yesno='{i}'] button").nth(idx).click()
+            click_form_control(scope.locator(f"[data-yesno='{i}'] button").nth(idx))
             pause(0.3, 0.6)
         except Exception:
             unanswered.append(q)
@@ -624,7 +675,7 @@ def fill_checkgroups(scope: Locator) -> list[str]:
                     continue
                 row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
                 try:
-                    row.click(timeout=4000)
+                    click_form_control(row, timeout=4000)
                 except PWTimeout:
                     cb.set_checked(wanted, force=True)
                 if cb.is_checked() != wanted:
@@ -689,7 +740,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                 if idx is None:
                     unanswered.append(q)
                 else:
-                    sugg.nth(idx).click()
+                    click_form_control(sugg.nth(idx))
         except Exception as e:
             if browser_closed(e):
                 raise BrowserClosed() from None
@@ -777,7 +828,7 @@ def discard(page: Page) -> None:
         pause(1, 2)
         btn = page.get_by_role("button", name=DISCARD_RE)
         if btn.count():
-            btn.first.click(timeout=4000)
+            click_form_control(btn.first, timeout=4000)
     except Exception:
         pass
     pause(1, 2)
@@ -842,6 +893,8 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
     """Durably track every intentional final submit, even on timeout/STOP/crash."""
     if STOP.is_set():
         raise Stopped
+    if DRY_RUN:
+        return "dry_run"  # Defense in depth, even if a caller misses its own check.
     state = applied if applied is not None else load_applied()
     previous = state.get(job_id)
     if previous and not can_retry(previous["status"]):
@@ -906,7 +959,11 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
     btn = page.get_by_role("button", name=EASY_APPLY_RE).first
     if not btn.count():
         return "no_easy_apply"
-    btn.click()
+    try:
+        click_form_control(btn)
+    except UnsafeFormControl:
+        record_manual(job_id, title, company, page.url, "submit-capable Easy Apply opener")
+        return "manual_review"
     modal = page.locator(MODAL).first
     try:
         modal.wait_for(timeout=10000)
@@ -924,31 +981,55 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
             return "manual_review"
         follow = modal.locator("input#follow-company-checkbox:checked")
         if follow.count():
-            modal.locator("label[for='follow-company-checkbox']").click()
+            try:
+                click_form_control(modal.locator("label[for='follow-company-checkbox']"))
+            except UnsafeFormControl:
+                require_manual_review(page, modal, ["unsafe follow-company control"], job_id, title, company)
+                discard(page)
+                return "manual_review"
 
         primary = modal.locator("footer button:visible").last
         if not primary.count():
             screenshot(page, f"{job_id}_nobutton")
             discard(page)
             return "skipped_no_button"
-        text = (primary.inner_text() + " " + (primary.get_attribute("aria-label") or "")).lower()
+        action = application_button_action(primary)
 
-        if "submit" in text or "gönder" in text:
+        if action == "submit":
             if DRY_RUN:
                 screenshot(page, f"{job_id}_dryrun")
                 discard(page)
                 return "dry_run"
             return submit_linkedin(page, modal, primary, job_id, title, company, applied)
 
+        if action != "next":
+            require_manual_review(page, modal, ["unrecognized application action"], job_id, title, company)
+            discard(page)
+            return "manual_review"
+
         before = modal.inner_text()
-        primary.click()
+        try:
+            click_navigation(primary)
+        except UnsafeFormControl:
+            require_manual_review(page, modal, ["submit-capable navigation control"], job_id, title, company)
+            discard(page)
+            return "manual_review"
         pause(1.5, 3)
         if has_errors(modal) or modal.inner_text() == before:
             unanswered = fill_step(page, modal)  # bir kez daha dene
             if require_manual_review(page, modal, unanswered, job_id, title, company):
                 discard(page)
                 return "manual_review"
-            primary.click()
+            # This locator may now refer to a different step's final button.
+            # Re-enter the guarded branch instead of treating it as old Next.
+            if application_button_action(primary) != "next":
+                continue
+            try:
+                click_navigation(primary)
+            except UnsafeFormControl:
+                require_manual_review(page, modal, ["submit-capable navigation control"], job_id, title, company)
+                discard(page)
+                return "manual_review"
             pause(1.5, 3)
             if has_errors(modal) or modal.inner_text() == before:
                 screenshot(page, f"{job_id}_unanswered")
@@ -1103,7 +1184,10 @@ def follow_apply(page: Page, btn: Locator) -> str | None:
         return None
     ctx = page.context
     before, start = len(ctx.pages), page.url
-    btn.click()
+    try:
+        click_form_control(btn)
+    except UnsafeFormControl:
+        return None
     for _ in range(30):
         time.sleep(0.5)
         if page.url != start and urlparse(page.url).netloc != urlparse(start).netloc:
@@ -1123,7 +1207,10 @@ def follow_apply(page: Page, btn: Locator) -> str | None:
         # "Profilini paylaş / Devam et" ara penceresi
         cont = page.locator(MODAL).get_by_role("button", name=re.compile(r"continue|devam", re.I))
         if cont.count():
-            cont.first.click()
+            try:
+                click_form_control(cont.first)
+            except UnsafeFormControl:
+                return None
     return None
 
 
@@ -1195,8 +1282,8 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str, appl
     pause(3, 5)
     try:
         return apply_trusted_form(page, job_id, title, company, form_url, ats, applied)
-    except UntrustedApplicationSite as e:
-        log(f"  ! untrusted application site: {e}")
+    except (UntrustedApplicationSite, UnsafeFormControl) as e:
+        log(f"  ! unsafe application site/action: {e}")
         record_manual(job_id, title, company, url, str(e))
         return "external_manual"
 
@@ -1207,7 +1294,7 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
     if ats == "ashby":
         tab = document.get_by_role("tab", name=re.compile(r"application", re.I))
         if tab.count():
-            tab.first.click()
+            click_form_control(tab.first)
             pause(1.5, 2.5)
     form = document.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
     if not form.count():

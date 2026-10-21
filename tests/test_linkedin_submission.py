@@ -91,6 +91,7 @@ class PersistenceTests(SafetyTest):
         empty = node()
         empty.count.return_value = 0
         self.primary.inner_text.return_value = "Submit application"
+        self.primary.evaluate.return_value = True
         self.page.get_by_role.return_value = self.primary
         self.page.locator.return_value = self.modal
         self.modal.locator.side_effect = lambda selector: self.primary if "footer button" in selector else empty

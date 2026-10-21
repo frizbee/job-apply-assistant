@@ -144,6 +144,8 @@ class SubmitterTests(HistoryTestBase):
         page.context.pages = [page]
         page.locator.return_value = form
         page.get_by_role.return_value = node() if board == "wellfound" else send
+        page.get_by_role.return_value.evaluate.return_value = True
+        form.evaluate.return_value = True
         form.get_by_role.return_value = send
         send.inner_text.return_value = "Submit your application"
         job = {"id": f"{board}:123", "title": "Engineer", "company": "Example", "url": page.url}

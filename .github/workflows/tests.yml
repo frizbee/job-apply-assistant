@@ -1,4 +1,4 @@
-name: Unit tests
+name: Tests
 
 on: [push, pull_request]
 
@@ -17,4 +17,9 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+      - name: Install Chrome for form-safety regressions
+        run: python -m playwright install --with-deps chrome
+      - name: Run unit and browser tests
+        env:
+          AUTOAPPLY_BROWSER_TESTS: "1"
+        run: python -m unittest discover -s tests -v
