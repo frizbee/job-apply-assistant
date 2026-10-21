@@ -5,6 +5,7 @@ tarayıcıda sayfa açılır. CV yükleme, bilgileri onaylama, başlat/durdur ve
 Sunucu sadece bu bilgisayardan (127.0.0.1) erişilebilir.
 """
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -22,8 +23,34 @@ import cv_profile
 
 TOKEN = secrets.token_urlsafe(16)
 STATE = {"running": False, "analyzing": False}
+# A plain Lock may be released by the worker that receives the reservation.
+# It covers preparation and the whole run, not just Thread.start().
+ACTIVITY_LOCK = threading.Lock()
 REQUIRED = ["first_name", "last_name", "email", "phone_intl", "city", "country"]  # formlar bunları hep soruyor
 SOURCE_NAMES = ["linkedin", "wellfound", "indeed", "remoteok", "himalayas", "weworkremotely"]
+
+
+def busy_error() -> dict:
+    return {"error": "already_running" if STATE["running"] else "busy"}
+
+
+def begin_activity(flag: str | None = None) -> bool:
+    if not ACTIVITY_LOCK.acquire(blocking=False):
+        return False
+    if STATE["running"] or STATE["analyzing"]:
+        ACTIVITY_LOCK.release()
+        return False
+    if flag:
+        if flag == "running":
+            apply.STOP.clear()  # Clear the old run's cancellation before publishing this run.
+        STATE[flag] = True
+    return True
+
+
+def finish_activity(flag: str | None = None) -> None:
+    if flag:
+        STATE[flag] = False
+    ACTIVITY_LOCK.release()
 
 
 def open_folder(path: Path) -> None:
@@ -58,6 +85,15 @@ def state() -> dict:
 
 
 def save_cv(body: dict) -> dict:
+    if not begin_activity():
+        return busy_error()
+    try:
+        return _save_cv(body)
+    finally:
+        finish_activity()
+
+
+def _save_cv(body: dict) -> dict:
     name = re.sub(r"[^\w.\- ]", "_", Path(body["name"]).name)
     if Path(name).suffix.lower() not in (".pdf", ".docx"):
         return {"error": "pdf_docx_only"}
@@ -70,6 +106,15 @@ def save_cv(body: dict) -> dict:
 
 
 def analyze(body: dict) -> dict:
+    if not begin_activity("analyzing"):
+        return busy_error()
+    try:
+        return _analyze(body)
+    finally:
+        finish_activity("analyzing")
+
+
+def _analyze(body: dict) -> dict:
     key = re.sub(r"[\s\u200b-\u200d\ufeff]", "", body.get("key") or "")  # kopyalamada gelen boşluk/görünmez karakterler
     if key:
         if not re.fullmatch(r"sk-or-[A-Za-z0-9_-]{20,}", key):
@@ -90,22 +135,63 @@ def analyze(body: dict) -> dict:
     resume = Path(apply.SETTINGS.get("resume") or "missing")
     if not resume.is_file():
         return {"error": "no_cv"}
-    STATE["analyzing"] = True
     try:
         prof = cv_profile.extract(resume, key, log=apply.log)
         cv_profile.validate(prof)
     except Exception as e:
         return {"error": "analyze_failed", "detail": f"{e.__class__.__name__}: {str(e)[:200]}"}
-    finally:
-        STATE["analyzing"] = False
     apply.SETTINGS["cv_profile"] = prof
     apply.SETTINGS["cv_hash"] = hashlib.sha256(resume.read_bytes()).hexdigest()
     return {"ok": True, "profile": prof}
 
 
 def start(body: dict) -> dict:
-    if STATE["running"]:
-        return {"error": "already_running"}
+    if not begin_activity("running"):
+        return busy_error()
+    handed_off = False
+    snapshot = None
+    try:
+        snapshot = (copy.deepcopy(apply.SETTINGS), copy.deepcopy(apply.CFG), copy.deepcopy(apply.PROFILE),
+                    apply.DRY_RUN, list(apply.LOG_LINES), apply.CFG.get("profile") is apply.PROFILE)
+        result = _prepare_start(body)
+        if "error" in result:
+            return result
+
+        def worker():
+            try:
+                apply.run_bot(reset_stop=False)  # Preserve Stop received while this worker was queued.
+            except BaseException as e:  # The reservation must also survive STOP/browser closure.
+                apply.log(f"HATA: {e}")
+            finally:
+                finish_activity("running")
+
+        threading.Thread(target=worker, daemon=True).start()
+        handed_off = True
+        return {"ok": True}
+    except Exception as e:
+        if snapshot is not None:
+            # Roll back the in-memory publication; no worker has been handed off.
+            # finalize_settings may already have saved the user's validated preferences.
+            settings, config, profile, dry_run, logs, aliased_profile = snapshot
+            apply.SETTINGS.clear()
+            apply.SETTINGS.update(settings)
+            apply.CFG.clear()
+            apply.CFG.update(config)
+            apply.PROFILE.clear()
+            apply.PROFILE.update(profile)
+            if aliased_profile:
+                apply.CFG["profile"] = apply.PROFILE
+            apply.DRY_RUN = dry_run
+            apply.LOG_LINES[:] = logs
+        detail = f"{e.__class__.__name__}: {str(e)[:200]}"
+        apply.log(f"Start failed: {detail}")
+        return {"error": "startup_failed", "detail": detail}
+    finally:
+        if not handed_off:
+            finish_activity("running")
+
+
+def _prepare_start(body: dict) -> dict:
     s = apply.SETTINGS
     if not Path(s.get("resume") or "missing").is_file():
         return {"error": "no_cv"}
@@ -129,6 +215,16 @@ def start(body: dict) -> dict:
     missing = [k for k in REQUIRED if not str(prof.get(k) or "").strip()]
     if missing:
         return {"error": "missing", "fields": missing}
+    # Validate publication-critical options before changing any shared settings.
+    english, locations, sources = body.get("english"), body.get("locations"), body.get("sources")
+    if not isinstance(english, str) or english not in apply.ENGLISH_LEVELS:
+        return {"error": "invalid_settings", "detail": "settings.english: unknown level"}
+    if type(body.get("test_mode")) is not bool:
+        return {"error": "invalid_settings", "detail": "settings.test_mode: expected boolean"}
+    if not isinstance(sources, list) or any(not isinstance(name, str) or name not in SOURCE_NAMES for name in sources):
+        return {"error": "invalid_settings", "detail": "settings.sources: expected known source names"}
+    if not isinstance(locations, list) or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
+        return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
     # Aylık beklentiler: kendi para birimi + EUR + USD. Yıllık "salary" diğer para birimlerine çevirmenin tabanı.
     cur = body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD"
     monthly = {}
@@ -142,22 +238,13 @@ def start(body: dict) -> dict:
     s.update(cv_profile=prof,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
              locations=body["locations"] or apply.CFG["search"]["locations"],
-             sources=body["sources"], test_mode=bool(body["test_mode"]))
+              sources=body["sources"], test_mode=body["test_mode"])
     for name in SOURCE_NAMES:
         apply.CFG["sources"][name] = name in body["sources"]
     apply.DRY_RUN = s["test_mode"]
     apply.finalize_settings()
     apply.LOG_LINES.clear()
 
-    def worker():
-        STATE["running"] = True
-        try:
-            apply.run_bot()
-        except BaseException as e:  # noqa: BLE001 - arayüzde göster
-            apply.log(f"HATA: {e}")
-        finally:
-            STATE["running"] = False
-    threading.Thread(target=worker, daemon=True).start()
     return {"ok": True}
 
 
@@ -329,7 +416,7 @@ const T = {
   err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
   change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
-   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_invalid_profile:"Invalid profile. Check your details or read the CV again.", err_no_titles:"Please enter at least one job title.", err_missing:"Please fill in the fields marked in red. Application forms always ask for them.", err_already_running:"Already running." },
+   err_analyze_failed:"Could not read the CV automatically. You can fill in your details yourself.", err_invalid_profile:"Invalid profile. Check your details or read the CV again.", err_invalid_settings:"Invalid run settings. Check the selected options.", err_startup_failed:"Could not start. Check the log and try again.", err_busy:"Another operation is in progress. Wait for it to finish.", err_no_titles:"Please enter at least one job title.", err_missing:"Please fill in the fields marked in red. Application forms always ask for them.", err_already_running:"Already running." },
  tr: { step1:"Adım 1", cv_title:"CV'n", cv_hint:"CV'ni yükle (PDF veya Word). Ücretsiz bir yapay zeka modeli okuyup bilgilerini ve sana uygun pozisyonları çıkarır.",
   cv_drop:"CV'ni seçmek için tıkla (.pdf veya .docx)", key_label:"Ücretsiz anahtarını al (bir kerelik, yaklaşık 1 dakika)",
   free_title:"Tamamen ücretsiz - hiçbir ücret ödemezsin.", free_text:"CV'n OpenRouter'daki ücretsiz bir yapay zeka modeliyle okunur. Uygulama sadece ücretsiz modelleri kullanır. Kredi kartı gerekmez, hiçbir şey satın almazsın.",
@@ -351,7 +438,7 @@ const T = {
   err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
-   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_invalid_profile:"Geçersiz profil. Bilgilerini kontrol et veya CV'yi yeniden oku.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
+   err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_invalid_profile:"Geçersiz profil. Bilgilerini kontrol et veya CV'yi yeniden oku.", err_invalid_settings:"Geçersiz çalışma ayarları. Seçenekleri kontrol et.", err_startup_failed:"Başlatılamadı. Kaydı kontrol edip tekrar dene.", err_busy:"Başka bir işlem devam ediyor. Tamamlanmasını bekle.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
 const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);

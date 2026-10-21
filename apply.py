@@ -1757,14 +1757,18 @@ def launch(pw):
     raise RuntimeError("Google Chrome bulunamadı. https://www.google.com/chrome adresinden yükleyip tekrar dene.") from last
 
 
-def run_bot() -> int:
+def run_bot(*, reset_stop: bool = True) -> int:
     """Başlangıç bilgileri (SETTINGS) hazırken başvuruları yapar."""
     global DEADLINE
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
     DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
-    STOP.clear()
+    if reset_stop:
+        STOP.clear()
+    if STOP.is_set():
+        log("Durduruldu (başlamadan önce).")
+        return 0
     applied = load_applied()
     # Quota is per run; keep 'last' so restarting does not bypass the cooldown.
     EXT_STATE["count"] = 0

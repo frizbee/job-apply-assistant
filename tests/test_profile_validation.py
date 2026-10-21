@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -186,6 +187,7 @@ class ProfileBoundaryTests(SafetyTest):
         self.resume.write_bytes(b"test resume")
         apply.SETTINGS.update(resume=str(self.resume), notice="14")
         self.enterContext(patch.object(gui, "STATE", {"running": False, "analyzing": False}))
+        self.enterContext(patch.object(gui, "ACTIVITY_LOCK", threading.Lock()))
         self.enterContext(patch.object(apply, "find_key", return_value="test-key"))
         self.thread = self.enterContext(patch.object(gui.threading, "Thread"))
         self.enterContext(patch.object(apply, "DRY_RUN", False))
@@ -266,6 +268,8 @@ class ProfileBoundaryTests(SafetyTest):
             with patch.object(apply, "finalize_settings"):
                 self.assertEqual(gui.start(body), {"ok": True})
             self.assertEqual(apply.SETTINGS["cv_profile"]["total_years"], expected)
+            with patch.object(apply, "run_bot", return_value=0):
+                self.thread.call_args.kwargs["target"]()
 
     def test_invalid_cache_is_not_served_to_js_and_manual_entry_can_replace_it(self):
         apply.SETTINGS["cv_profile"] = {**profile(), "skills": [None]}
