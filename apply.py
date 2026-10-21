@@ -165,12 +165,15 @@ def job_key(title: str, company: str) -> str:
 
 def applied_elsewhere(applied: dict, title: str, company: str) -> bool:
     key = job_key(title, company)
-    return any(v.get("key") == key and v["status"].startswith("applied") for v in applied.values())
+    return any(v.get("key") == key and (v["status"].startswith("applied")
+               or v["status"] in ("submission_pending", "submission_unconfirmed")) for v in applied.values())
 
 
 def record(applied: dict, job_id: str, title: str, company: str, status: str, url: str = "") -> None:
     applied[job_id] = {"status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company)}
-    APPLIED_FILE.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
+    temporary = APPLIED_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
+    temporary.replace(APPLIED_FILE)
     new_file = not LOG_FILE.exists()
     with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -742,7 +745,78 @@ def discard(page: Page) -> None:
     pause(1, 2)
 
 
-def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "") -> str:
+LINKEDIN_SENT_RE = re.compile(
+    r"^(?:(?:your )?application (?:was |has been )?(?:sent|submitted)(?: successfully)?"
+    r"(?:\s+to\b.*)?|başvurunuz (?:gönderildi|iletildi|alındı))[.!]?$", re.I)
+
+
+def linkedin_submission_signals(page: Page) -> set[str]:
+    """Explicit confirmation lines only, not generic 'thanks' or job descriptions."""
+    texts = page.locator(
+        "dialog[open]:visible, [role='dialog']:visible, .artdeco-toast-item:visible, [role='status']:visible"
+    ).all_inner_texts()
+    return {line.strip().casefold() for text in texts for line in text.splitlines()
+            if LINKEDIN_SENT_RE.fullmatch(line.strip())}
+
+
+def wait_linkedin_submission(page: Page, modal: Locator, before: set[str], timeout_seconds: float = 25,
+                             expected_url: str | None = None) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if expected_url is not None and page.url != expected_url:
+            return "submission_unconfirmed"
+        # A pre-existing toast or a closed modal alone is not proof of submission.
+        if linkedin_submission_signals(page) - before:
+            return "applied"
+        if modal.locator(
+            "[aria-invalid='true']:visible, .artdeco-inline-feedback--error:visible, "
+            "[data-test-form-element-error-messages]:visible"
+        ).count():
+            return "submission_rejected"
+        alerts = modal.locator("[role='alert']:visible").all_inner_texts()
+        if any(re.search(r"error|failed|unable|could not|something went wrong|required|try again|hata|zorunlu", a, re.I)
+               for a in alerts):
+            return "submission_unconfirmed"
+        if time.monotonic() >= deadline:
+            return "submission_unconfirmed"
+        pause(0.5, 0.5)
+
+
+def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str,
+                    title: str, company: str, applied: dict | None = None) -> str:
+    if STOP.is_set():
+        raise Stopped
+    expected_url = page.url
+    before = linkedin_submission_signals(page)
+    state = applied if applied is not None else load_applied()
+    url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+    # Persist before clicking: even a process crash must not cause a blind retry.
+    record(state, job_id, title, company, "submission_pending", url)
+    status = "submission_unconfirmed"
+    try:
+        if STOP.is_set():
+            raise Stopped
+        primary.click()
+        status = wait_linkedin_submission(page, modal, before, expected_url=expected_url)
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        log(f"  ! submission outcome unknown: {e.__class__.__name__}")
+    finally:
+        # Also runs for STOP/BrowserClosed (BaseException), preserving uncertainty.
+        record(state, job_id, title, company, status, url)
+        if status != "applied":
+            screenshot(page, f"{job_id}_{status}")
+            record_manual(job_id, title, company, url, status + ": check LinkedIn application history before retrying")
+    if status == "applied":
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass  # A cleanup failure must not erase confirmed success.
+    return status
+
+
+def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", applied: dict | None = None) -> str:
     btn = page.get_by_role("button", name=EASY_APPLY_RE).first
     if not btn.count():
         return "no_easy_apply"
@@ -778,10 +852,7 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "") ->
                 screenshot(page, f"{job_id}_dryrun")
                 discard(page)
                 return "dry_run"
-            primary.click()
-            pause(3, 5)
-            page.keyboard.press("Escape")
-            return "applied"
+            return submit_linkedin(page, modal, primary, job_id, title, company, applied)
 
         before = modal.inner_text()
         primary.click()
@@ -1391,11 +1462,11 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             record(applied, job_id, title, company, reason)
             return False
         log(f"> {title} @ {company}")
-        status = apply_to_job(page, job_id, title, company)
+        status = apply_to_job(page, job_id, title, company, applied)
         if status == "no_easy_apply" and EXTERNAL:
             status = apply_external(page, job_id, title, company)
         log(f"  = {status}")
-        if status != "dry_run":
+        if status != "dry_run" and applied.get(job_id, {}).get("status") != status:
             record(applied, job_id, title, company, status)
         pause(4, 9)
         return status in ("applied", "applied_external", "dry_run")
