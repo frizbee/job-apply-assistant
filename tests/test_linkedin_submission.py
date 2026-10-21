@@ -110,11 +110,12 @@ class PersistenceTests(SafetyTest):
     def test_unknown_and_rejected_results_are_saved_for_manual_check(self):
         for status in ["submission_unconfirmed", "submission_rejected"]:
             with self.subTest(status=status):
+                self.state.clear()  # Independent attempts, not a retry of the previous subcase.
                 self.wait.return_value = status
                 self.assertEqual(self.submit(), status)
                 self.assertEqual(apply.load_applied()["123"]["status"], status)
                 self.assertIn(status, apply.MANUAL_FILE.read_text())
-                self.assertFalse(status.startswith(apply.RETRY_PREFIXES))
+                self.assertFalse(apply.can_retry(status))
 
     def test_click_timeout_never_becomes_success(self):
         self.primary.click.side_effect = apply.PWTimeout("click timed out after dispatch")
@@ -125,6 +126,7 @@ class PersistenceTests(SafetyTest):
     def test_stop_or_closed_browser_preserves_uncertain_result(self):
         for error in [apply.Stopped(), apply.BrowserClosed(), RuntimeError("Target closed")]:
             with self.subTest(error=error):
+                self.state.clear()
                 self.wait.side_effect = error
                 with self.assertRaises(apply.Stopped):
                     self.submit()
@@ -140,7 +142,7 @@ class PersistenceTests(SafetyTest):
         for status in ["submission_pending", "submission_unconfirmed"]:
             apply.record(self.state, "123", "Engineer", "Example", status)
             self.assertTrue(apply.applied_elsewhere(self.state, "Engineer", "Example"))
-            self.assertFalse(status.startswith(apply.RETRY_PREFIXES))
+            self.assertFalse(apply.can_retry(status))
         apply.record(self.state, "123", "Engineer", "Example", "submission_rejected")
         self.assertFalse(apply.applied_elsewhere(self.state, "Engineer", "Example"))
 

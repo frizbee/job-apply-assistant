@@ -17,7 +17,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import job_metadata
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0 Safari/537.36")
@@ -73,11 +73,11 @@ def click_apply(page) -> str | None:
     return core.follow_apply(page, btn.first)
 
 
-def external(page, job: dict, url: str | None, board: str) -> str:
+def external(page, job: dict, url: str | None, board: str, applied: dict | None = None) -> str:
     if not url or board in url:
         core.record_manual(job["id"], job["title"], job["company"], job["url"], "apply_link_not_found")
         return "external_manual"
-    return core.apply_form(page, job["id"], job["title"], job["company"], url)
+    return core.apply_form(page, job["id"], job["title"], job["company"], url, applied)
 
 
 # ---------------------------------------------------------------- Remote OK
@@ -102,10 +102,10 @@ def remoteok(page):
                             "workplace": job_metadata.workplace_kind(j.get("workplaceType"), j.get("remote"), j.get("location")),
                             "location": j.get("location", "")}}
 
-        def apply(job=job):
+        def apply(applied=None, job=job):
             if not goto(page, job["url"], "Remote OK"):
                 return "blocked"
-            return external(page, job, click_apply(page), "remoteok.com")
+            return external(page, job, click_apply(page), "remoteok.com", applied)
         yield job, apply
 
 
@@ -127,10 +127,10 @@ def himalayas(page):
                                 "workplace": job_metadata.workplace_kind(j.get("workplaceType"), j.get("remote")),
                                 "location": ", ".join(j.get("locationRestrictions") or [])}}
 
-            def apply(job=job):
+            def apply(applied=None, job=job):
                 if not goto(page, job["url"], "Himalayas"):
                     return "blocked"
-                return external(page, job, click_apply(page), "himalayas.app")
+                return external(page, job, click_apply(page), "himalayas.app", applied)
             yield job, apply
 
 
@@ -162,13 +162,13 @@ def weworkremotely(page):
                             "workplace": job_metadata.workplace_kind(item.findtext("workplaceType"), item.findtext("region")),
                             "location": item.findtext("region") or ""}}
 
-        def apply(job=job):
+        def apply(applied=None, job=job):
             if not goto(page, job["url"], "We Work Remotely"):
                 return "blocked"
             if page.locator("a[href*='account/register']").count():
                 if not wwr_login(page) or not goto(page, job["url"], "We Work Remotely"):
                     return "blocked"
-            return external(page, job, click_apply(page), "weworkremotely.com")
+            return external(page, job, click_apply(page), "weworkremotely.com", applied)
         yield job, apply
 
 
@@ -186,7 +186,7 @@ def wellfound_login(page) -> bool:
     return LOGGED_IN["wellfound"]
 
 
-def wellfound_apply(page, job: dict) -> str:
+def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
     if not wellfound_login(page) or not goto(page, job["url"], "Wellfound"):
         return "blocked"
     ctx, before, start = page.context, len(page.context.pages), page.url
@@ -203,7 +203,7 @@ def wellfound_apply(page, job: dict) -> str:
             new.close()
         else:
             page.goto(start, wait_until="domcontentloaded")
-        return external(page, job, url, "wellfound.com")
+        return external(page, job, url, "wellfound.com", applied)
     form = page.locator(f"{core.MODAL}, form:has(textarea)").first
     if not form.count():
         core.screenshot(page, f"{job['id'].replace(':', '_')}_noform")
@@ -219,13 +219,10 @@ def wellfound_apply(page, job: dict) -> str:
         core.screenshot(page, f"{job['id'].replace(':', '_')}_dryrun")
         page.keyboard.press("Escape")
         return "dry_run"
-    send.click()
-    for _ in range(15):
-        time.sleep(1)
-        if re.search(r"application (sent|submitted)|you applied|applied", page.locator("body").inner_text()[:5000], re.I):
-            return "applied"
-    core.screenshot(page, f"{job['id'].replace(':', '_')}_unconfirmed")
-    return "skipped_unconfirmed"
+    before = core.application_submission_signals(page)
+    expected_host = urlparse(page.url).hostname
+    return core.submit_application(page, send, job["id"], job["title"], job["company"], job["url"],
+        lambda: core.wait_application_submission(page, before, checks=15, expected_host=expected_host), applied)
 
 
 def wellfound(page):
@@ -239,7 +236,8 @@ def wellfound(page):
                 continue
             seen.add(jid)
             url = f"https://wellfound.com/jobs/{jid}"
-            if f"wellfound:{jid}" in core.load_applied():
+            prev = core.load_applied().get(f"wellfound:{jid}")
+            if prev and not core.can_retry(prev["status"]):
                 continue
             if not goto(page, url, "Wellfound"):
                 return
@@ -248,22 +246,19 @@ def wellfound(page):
             title, company = (m.group(1), m.group(2)) if m else (page.title(), "")
             job = {"id": f"wellfound:{jid}", "title": title, "company": company, "url": url,
                    "desc": page.locator("body").inner_text()[:20000], "location": ""}
-            yield job, (lambda job=job: wellfound_apply(page, job))
+            yield job, (lambda applied=None, job=job: wellfound_apply(page, job, applied))
 
 
 # ---------------------------------------------------------------- Indeed
 
-INDEED_DONE_RE = re.compile(r"application has been submitted|your application has been sent|başvurunuz gönderildi", re.I)
-
-
-def indeed_apply(page, job: dict) -> str:
+def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
     if not goto(page, job["url"], "Indeed"):
         return "blocked"
     easy = page.locator("#indeedApplyButton, button[id*='indeedApply']").first
     if not easy.count():
         btn = page.get_by_role("button", name=re.compile(r"apply on company site", re.I)).or_(
             page.get_by_role("link", name=re.compile(r"apply on company site", re.I)))
-        return external(page, job, core.follow_apply(page, btn.first), "indeed.com")
+        return external(page, job, core.follow_apply(page, btn.first), "indeed.com", applied)
     ctx, before = page.context, len(page.context.pages)
     easy.click()
     core.pause(4, 6)
@@ -277,8 +272,6 @@ def indeed_apply(page, job: dict) -> str:
             continue
         if not core.wait_human(ap, page_ready, "Indeed güvenlik doğrulamasını geç"):
             return "blocked"
-        if INDEED_DONE_RE.search(ap.locator("body").inner_text()[:5000]):
-            return "applied"
         scope = ap.locator("main").first if ap.locator("main").count() else ap.locator("body")
         unanswered = core.fill_step(ap, scope, external=True)
         if core.require_manual_review(ap, scope, unanswered, job["id"], job["title"], job["company"], job["url"]):
@@ -293,13 +286,10 @@ def indeed_apply(page, job: dict) -> str:
             if core.DRY_RUN:
                 core.screenshot(ap, f"{job['id'].replace(':', '_')}_dryrun")
                 return "dry_run"
-            primary.click()
-            for _ in range(15):
-                time.sleep(1)
-                if INDEED_DONE_RE.search(ap.locator("body").inner_text()[:5000]):
-                    return "applied"
-            core.screenshot(ap, f"{job['id'].replace(':', '_')}_unconfirmed")
-            return "skipped_unconfirmed"
+            before = core.application_submission_signals(ap)
+            expected_host = urlparse(ap.url).hostname
+            return core.submit_application(ap, primary, job["id"], job["title"], job["company"], job["url"],
+                lambda: core.wait_application_submission(ap, before, checks=15, expected_host=expected_host), applied)
         before_url, before_text = ap.url, ap.locator("body").inner_text()[:3000]
         primary.click()
         core.pause(2, 3)
@@ -331,7 +321,7 @@ def indeed(page):
                 continue
             job = {"id": f"indeed:{jk}", "title": title, "company": company,
                    "url": f"https://{domain}/viewjob?jk={jk}", "desc": text, "location": ""}
-            yield job, (lambda job=job: indeed_apply(page, job))
+            yield job, (lambda applied=None, job=job: indeed_apply(page, job, applied))
 
 
 # ---------------------------------------------------------------- ortak döngü
@@ -364,7 +354,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 if done >= limits.get("per_source", 15):
                     break
                 prev = applied.get(job["id"])
-                if prev and not prev["status"].startswith(core.RETRY_PREFIXES):
+                if prev and not core.can_retry(prev["status"]):
                     continue
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
@@ -384,15 +374,18 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     continue
                 core.log(f"> {job['title']} @ {job['company']} ({name})")
                 try:
-                    status = apply()
+                    status = apply(applied)
                 except Exception as e:
                     if core.browser_closed(e):
                         raise core.BrowserClosed() from None
                     core.log(f"  ! hata: {e.__class__.__name__}: {str(e)[:150]}")
                     core.screenshot(page, f"{job['id'].replace(':', '_')}_error")
-                    status = "skipped_error"
+                    # A durable submit state must survive exceptions in any caller.
+                    status = applied.get(job["id"], {}).get("status")
+                    if status not in core.UNCERTAIN_STATUSES and status not in ("applied", "applied_external", "submission_rejected"):
+                        status = "pre_submission_error"
                 core.log(f"  = {status}")
-                if status != "dry_run":
+                if status != "dry_run" and applied.get(job["id"], {}).get("status") != status:
                     core.record(applied, job["id"], job["title"], job["company"], status, job["url"])
                 if status in ("applied", "applied_external", "dry_run"):
                     count += 1

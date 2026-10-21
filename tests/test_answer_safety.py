@@ -260,7 +260,7 @@ class SubmissionGuardTests(SafetyTest):
         self.manual.assert_not_called()
 
     def test_manual_review_status_is_not_automatically_retried(self):
-        self.assertFalse("manual_review".startswith(apply.RETRY_PREFIXES))
+        self.assertFalse(apply.can_retry("manual_review"))
 
 
 @unittest.skipUnless(os.getenv("AUTOAPPLY_BROWSER_TESTS") == "1", "optional local Chrome DOM tests")

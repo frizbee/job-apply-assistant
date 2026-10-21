@@ -105,7 +105,15 @@ QUESTION_JS = r"""el => {
 
 
 # Bu durumlarla kaydedilen ilanlar sonraki çalıştırmada tekrar denenir
-RETRY_PREFIXES = ("skipped_", "modal_not_opened", "blocked") + (("no_easy_apply",) if EXTERNAL else ())
+RETRYABLE_STATUSES = frozenset({"modal_not_opened", "blocked", "skipped_no_button", "skipped_no_form",
+                               "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error"})
+LEGACY_UNCERTAIN_STATUSES = frozenset({"skipped_unconfirmed", "external_unconfirmed", "external_unanswered", "skipped_error"})
+UNCERTAIN_STATUSES = frozenset({"submission_pending", "submission_unconfirmed"}) | LEGACY_UNCERTAIN_STATUSES
+
+
+def can_retry(status: str) -> bool:
+    """Unknown/new statuses are not retryable unless explicitly reviewed here."""
+    return status in RETRYABLE_STATUSES or (status == "no_easy_apply" and EXTERNAL)
 
 
 class LimitReached(Exception):
@@ -154,9 +162,39 @@ def pause(a: float = 1.5, b: float = 3.5) -> None:
 
 def load_applied() -> dict:
     try:
-        return json.loads(APPLIED_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        applied = json.loads(APPLIED_FILE.read_text())
+    except FileNotFoundError:
         return {}
+    except json.JSONDecodeError as e:
+        raise RuntimeError("Application history is corrupt; restore it before running to avoid duplicate submissions") from e
+    if not isinstance(applied, dict) or any(not isinstance(v, dict) or not isinstance(v.get("status"), str)
+                                          for v in applied.values()):
+        raise RuntimeError("Invalid application history; refusing to submit without reliable history")
+    migrated = {job_id: v for job_id, v in applied.items() if v["status"] in LEGACY_UNCERTAIN_STATUSES}
+    if migrated:
+        details = {}
+        if LOG_FILE.exists():
+            with LOG_FILE.open(newline="", encoding="utf-8") as f:
+                details = {row.get("job_id"): row for row in csv.DictReader(f)}
+        for job_id, value in migrated.items():
+            value.update(legacy_status=value["status"], status="submission_unconfirmed")
+            row = details.get(job_id, {})
+            for field in ("title", "company", "url"):
+                value.setdefault(field, row.get(field, ""))
+            if not value.get("key") and value.get("title") and value.get("company"):
+                value["key"] = job_key(value["title"], value["company"])
+        write_applied(applied)
+        for job_id, value in migrated.items():
+            record_manual(job_id, value.get("title", ""), value.get("company", ""), value.get("url", ""),
+                          "migrated " + value["legacy_status"] + ": check application history before any manual retry")
+        log(f"Migrated {len(migrated)} uncertain attempts to manual review; automatic retries disabled.")
+    return applied
+
+
+def write_applied(applied: dict) -> None:
+    temporary = APPLIED_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
+    temporary.replace(APPLIED_FILE)
 
 
 def job_key(title: str, company: str) -> str:
@@ -167,14 +205,13 @@ def job_key(title: str, company: str) -> str:
 def applied_elsewhere(applied: dict, title: str, company: str) -> bool:
     key = job_key(title, company)
     return any(v.get("key") == key and (v["status"].startswith("applied")
-               or v["status"] in ("submission_pending", "submission_unconfirmed")) for v in applied.values())
+               or v["status"] in UNCERTAIN_STATUSES) for v in applied.values())
 
 
 def record(applied: dict, job_id: str, title: str, company: str, status: str, url: str = "") -> None:
-    applied[job_id] = {"status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company)}
-    temporary = APPLIED_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
-    temporary.replace(APPLIED_FILE)
+    applied[job_id] = {"status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company),
+                       "title": title, "company": company, "url": url or f"https://www.linkedin.com/jobs/view/{job_id}/"}
+    write_applied(applied)
     new_file = not LOG_FILE.exists()
     with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -789,8 +826,31 @@ def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str,
         raise Stopped
     expected_url = page.url
     before = linkedin_submission_signals(page)
-    state = applied if applied is not None else load_applied()
     url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+    status = submit_application(page, primary, job_id, title, company, url,
+        lambda: wait_linkedin_submission(page, modal, before, expected_url=expected_url), applied)
+    if status == "applied":
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+    return status
+
+
+def submit_application(page: Page, primary: Locator, job_id: str, title: str, company: str,
+                       url: str, wait_result, applied: dict | None = None) -> str:
+    """Durably track every intentional final submit, even on timeout/STOP/crash."""
+    if STOP.is_set():
+        raise Stopped
+    state = applied if applied is not None else load_applied()
+    previous = state.get(job_id)
+    if previous and not can_retry(previous["status"]):
+        if previous["status"].startswith("applied"):
+            return "applied_previously"
+        if previous["status"] in UNCERTAIN_STATUSES:
+            record_manual(job_id, title, company, url, "previous uncertain attempt: check application history before retrying")
+            return "submission_unconfirmed"
+        return previous["status"]
     # Persist before clicking: even a process crash must not cause a blind retry.
     record(state, job_id, title, company, "submission_pending", url)
     status = "submission_unconfirmed"
@@ -798,7 +858,9 @@ def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str,
         if STOP.is_set():
             raise Stopped
         primary.click()
-        status = wait_linkedin_submission(page, modal, before, expected_url=expected_url)
+        result = wait_result()
+        if result in ("applied", "applied_external", "submission_rejected"):
+            status = result
     except Exception as e:
         if browser_closed(e):
             raise BrowserClosed() from None
@@ -806,15 +868,38 @@ def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str,
     finally:
         # Also runs for STOP/BrowserClosed (BaseException), preserving uncertainty.
         record(state, job_id, title, company, status, url)
-        if status != "applied":
-            screenshot(page, f"{job_id}_{status}")
-            record_manual(job_id, title, company, url, status + ": check LinkedIn application history before retrying")
-    if status == "applied":
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass  # A cleanup failure must not erase confirmed success.
+        if status not in ("applied", "applied_external"):
+            screenshot(page, f"{job_id.replace(':', '_')}_{status}")
+            record_manual(job_id, title, company, url, status + ": check application history before retrying")
     return status
+
+
+APPLICATION_SENT_RE = re.compile(
+    r"^(?:(?:your )?application (?:was |has been )?(?:sent|submitted|received)(?: successfully)?(?:\s+to\b.*)?|"
+    r"you (?:have )?(?:successfully )?applied(?:\s+to\b.*)?|thank you for (?:applying|your application)|"
+    r"başvurunuz (?:gönderildi|iletildi|alındı))[.!]?$", re.I)
+
+
+def application_submission_signals(page: Page) -> set[str]:
+    texts = page.locator("[role='dialog']:visible, [role='status']:visible, [role='alert']:visible, "
+        "main h1:visible, main h2:visible, [data-testid='application-confirmation']:visible").all_inner_texts()
+    return {line.strip().casefold() for text in texts for line in text.splitlines()
+            if APPLICATION_SENT_RE.fullmatch(line.strip())}
+
+
+def wait_application_submission(page: Page, before: set[str], checks: int = 25,
+                                 expected_host: str | None = None) -> str:
+    for _ in range(checks):
+        if expected_host is not None and urlparse(page.url).hostname != expected_host:
+            return "submission_unconfirmed"
+        if application_submission_signals(page) - before:
+            return "applied"
+        if page.locator("[aria-invalid='true']:visible, [class*='error' i]:visible:has-text('required')").count():
+            return "submission_rejected"
+        if page.locator(CAPTCHA_SEL).count():
+            return "submission_unconfirmed"
+        pause(1, 1)
+    return "submission_unconfirmed"
 
 
 def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", applied: dict | None = None) -> str:
@@ -958,9 +1043,6 @@ def check_ats_form(page: Page, document: Locator, form: Locator, ats: str) -> No
 
 APPLY_BTN_RE = re.compile(r"\bapply\b|başvur", re.I)
 SUBMIT_RE = re.compile(r"submit|send application|apply|başvur|gönder", re.I)
-DONE_RE = re.compile(
-    r"thank(s| you)|application (was |has been )?(received|submitted|sent)|we.ve received|"
-    r"successfully (submitted|applied)|teşekkür|başvurunuz (alındı|iletildi)", re.I)
 CAPTCHA_SEL = "iframe[src*='hcaptcha'][title*='challenge'], iframe[src*='recaptcha'][title*='challenge']:visible"
 
 
@@ -1083,14 +1165,14 @@ def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
 EXT_STATE = {"count": 0, "last": 0.0}
 
 
-def apply_external(page: Page, job_id: str, title: str, company: str) -> str:
+def apply_external(page: Page, job_id: str, title: str, company: str, applied: dict | None = None) -> str:
     url = external_url(page)
     if not url:
         return "no_apply_button"
-    return apply_form(page, job_id, title, company, url)
+    return apply_form(page, job_id, title, company, url, applied)
 
 
-def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> str:
+def apply_form(page: Page, job_id: str, title: str, company: str, url: str, applied: dict | None = None) -> str:
     """Şirket sitesindeki başvuru formu. Spam sayılmamak için çalıştırma başına sınırlı ve aralıklı."""
     ext = CFG["external"]
     if not EXTERNAL:
@@ -1112,14 +1194,15 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str) -> s
     page.goto(form_url, wait_until="domcontentloaded", timeout=30000)
     pause(3, 5)
     try:
-        return apply_trusted_form(page, job_id, title, company, form_url, ats)
+        return apply_trusted_form(page, job_id, title, company, form_url, ats, applied)
     except UntrustedApplicationSite as e:
         log(f"  ! untrusted application site: {e}")
         record_manual(job_id, title, company, url, str(e))
         return "external_manual"
 
 
-def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_url: str, ats: str) -> str:
+def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_url: str, ats: str,
+                       applied: dict | None = None) -> str:
     document = trusted_ats_document(page, ats)
     if ats == "ashby":
         tab = document.get_by_role("tab", name=re.compile(r"application", re.I))
@@ -1151,20 +1234,11 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
         return "dry_run"
 
     check_ats_form(page, document, form, ats)
-    submit.last.click()
-    for _ in range(25):
-        time.sleep(1)
-        if page.locator("[aria-invalid='true']:visible, [class*='error' i]:visible:has-text('required')").count():
-            screenshot(page, f"{job_id}_ext_invalid")
-            record_manual(job_id, title, company, form_url, "form_errors_after_submit")
-            return "external_unanswered"
-        if DONE_RE.search(page.locator("body").inner_text()) or re.search(r"confirm|thank|success", page.url):
-            return "applied_external"
-        if page.locator(CAPTCHA_SEL).count():
-            break
-    screenshot(page, f"{job_id}_ext_unconfirmed")
-    record_manual(job_id, title, company, form_url, "submitted_unconfirmed_or_captcha")
-    return "external_unconfirmed"
+    before = application_submission_signals(page)
+    def wait_result():
+        result = wait_application_submission(page, before, expected_host=urlparse(form_url).hostname)
+        return "applied_external" if result == "applied" else result
+    return submit_application(page, submit.last, job_id, title, company, form_url, wait_result, applied)
 
 
 # ---------------------------------------------------------------- search
@@ -1507,7 +1581,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         log(f"> {title} @ {company}")
         status = apply_to_job(page, job_id, title, company, applied)
         if status == "no_easy_apply" and EXTERNAL:
-            status = apply_external(page, job_id, title, company)
+            status = apply_external(page, job_id, title, company, applied)
         log(f"  = {status}")
         if status != "dry_run" and applied.get(job_id, {}).get("status") != status:
             record(applied, job_id, title, company, status)
@@ -1551,7 +1625,7 @@ def run_linkedin(page: Page, applied: dict, count: int) -> int:
     try:
         for job_ids in job_lists(page):
             for job_id in job_ids:
-                if job_id in applied and not applied[job_id]["status"].startswith(RETRY_PREFIXES):
+                if job_id in applied and not can_retry(applied[job_id]["status"]):
                     continue
                 if count >= stop or time.time() > DEADLINE:
                     raise LimitReached
@@ -1588,6 +1662,8 @@ def run_bot() -> int:
     DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
     STOP.clear()
     applied = load_applied()
+    # Quota is per run; keep 'last' so restarting does not bypass the cooldown.
+    EXT_STATE["count"] = 0
     log(f"Başlıyor ({'test modu, başvuru gönderilmez' if DRY_RUN else 'gerçek başvuru'}), daha önce işlenen ilan: {len(applied)}")
     count = 0
     with sync_playwright() as pw:
