@@ -108,8 +108,8 @@ class BrowserFormActionTests(SafetyTest):
             self.assertEqual(self.page.evaluate("window.sent"), 0)
 
     def test_explicit_non_submit_yesno_still_selects_answer(self):
-        form = self.form(f'<p>{self.question}</p><div><button type="button" onclick="window.choice=\'Yes\'">Yes</button>'
-                         '<button type="button">No</button></div>')
+        form = self.form(f'<p>{self.question}</p><div><button type="button" aria-pressed="false" onclick="window.choice=\'Yes\';this.setAttribute(\'aria-pressed\',\'true\')">Yes</button>'
+                         '<button type="button" aria-pressed="false">No</button></div>')
         self.assertEqual(apply.fill_yesno(form), [])
         self.assertEqual(self.page.evaluate("window.choice"), "Yes")
         self.assertEqual(self.page.evaluate("window.sent"), 0)

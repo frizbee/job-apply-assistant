@@ -144,9 +144,12 @@ class ControlTests(SafetyTest):
         apply.CFG["confirmed_answers"] = {"Have you been convicted?": "No"}
         scope = MagicMock()
         scope.evaluate.return_value = [("Have you been convicted?", False)]
-        scope.locator.return_value.nth.return_value.evaluate.return_value = True
+        group = scope.locator.return_value
+        group.evaluate.side_effect = [{"question": "Have you been convicted?", "states": [True, False]},
+                                      {"question": "Have you been convicted?", "states": [False, True]}]
+        group.locator.return_value.nth.return_value.evaluate.return_value = True
         self.assertEqual(apply.fill_yesno(scope), [])
-        scope.locator.return_value.nth.assert_called_once_with(1)
+        group.locator.return_value.nth.assert_called_once_with(1)
 
     def test_unknown_checkbox_group_does_not_guess_from_skills_or_first_option(self):
         apply.CFG["skill_years"] = {"python": 3}

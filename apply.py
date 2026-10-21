@@ -510,38 +510,87 @@ RADIO_GROUP_JS = r"""fs => {
 }"""
 
 
+RADIO_GROUPS = "fieldset:has(input[type='radio']):visible, [role='radiogroup']:visible"
+RADIO_SELECTION_JS = r"""root => {
+    const native = [...root.querySelectorAll('input[type=radio]')];
+    const roles = [...root.querySelectorAll('[role=radio]')];
+    const nativeState = input => {
+        const aria = input.getAttribute('aria-checked');
+        return aria === null || aria === String(input.checked) ? input.checked : null;
+    };
+    if (!roles.length) return native.map(nativeState);
+    // Do not overlook an actual submitted radio value outside the custom options.
+    if (native.some(input => !roles.some(option => option === input || option.contains(input)))) return [];
+    return roles.map(option => {
+        if (option.matches('input[type=radio]')) return nativeState(option);
+        const aria = option.getAttribute('aria-checked');
+        if (aria !== 'true' && aria !== 'false') return null;
+        const selected = aria === 'true';
+        const backing = [...option.querySelectorAll('input[type=radio]')];
+        if (backing.length > 1 || (backing.length === 1 && nativeState(backing[0]) !== selected)) return null;
+        return selected;
+    });
+}"""
+
+
+def radio_choice_confirmed(states, index) -> bool:
+    """Unknown/inconsistent state is not False: require one exact, exclusive choice."""
+    return (isinstance(states, list) and type(index) is int and 0 <= index < len(states)
+            and states[index] is True and all(state is False for i, state in enumerate(states) if i != index))
+
+
 def fill_radios(scope: Locator) -> list[str]:
     """Radyo butonlu sorular; cevaplanamayanları döndürür. Yeni LinkedIn formunda
     seçenekler div[role=radio] ve <label> boş; eski formda <legend> + <label for>."""
     unanswered: list[str] = []
     # Preselected options also need a confirmed matching answer.
-    for fs in scope.locator("fieldset:has(input[type='radio']):visible, [role='radiogroup']:visible").all():
+    for fs in scope.locator(RADIO_GROUPS).all():
+        q = ""
         try:
             q, labels = fs.evaluate(RADIO_GROUP_JS)
-            idx = choose_option(q, labels)
+            idx = choose_option(q, labels) if q.strip() else None
             if idx is None:
                 log(f"    ? cevapsız soru: {q[:90]}")
+                unanswered.append(q or "radio group")
+                continue
+            before = fs.evaluate(RADIO_SELECTION_JS)
+            if len(before) != len(labels):
                 unanswered.append(q)
                 continue
-            items = fs.locator("[role='radio']")
-            if items.count():
-                click_form_control(items.nth(idx))
-            else:
-                radio = fs.locator("input[type='radio']").nth(idx)
-                # Metni olan en yakın üst öğe = tıklanabilir seçenek satırı
-                row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
-                try:
-                    click_form_control(row)
-                except PWTimeout:
-                    radio.check(force=True)
-                if not fs.locator("input[type='radio']:checked").count():
-                    radio.check(force=True)
+            if not radio_choice_confirmed(before, idx):
+                items = fs.locator("[role='radio']")
+                if items.count():
+                    target = items.nth(idx)
+                    if not target.is_enabled():
+                        unanswered.append(q)
+                        continue
+                    click_form_control(target)
+                else:
+                    radio = fs.locator("input[type='radio']").nth(idx)
+                    if radio.is_disabled():
+                        unanswered.append(q)
+                        continue
+                    # Use the native control first, not an unbound text wrapper.
+                    try:
+                        radio.check(timeout=2000)
+                    except PWTimeout:
+                        # Hidden native inputs may be driven by a visible label/row.
+                        if not radio.is_checked():
+                            row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                            click_form_control(row)
+                            if not radio.is_checked():
+                                radio.check(force=True, timeout=2000)
             pause(0.3, 0.7)
+            current_q, current_labels = fs.evaluate(RADIO_GROUP_JS)
+            after = fs.evaluate(RADIO_SELECTION_JS)
+            if current_q != q or current_labels != labels or len(after) != len(labels) or not radio_choice_confirmed(after, idx):
+                log(f"    ? radio seçimi doğrulanamadı: {q[:90]}")
+                unanswered.append(q)
         except Exception as e:
             if browser_closed(e):
                 raise BrowserClosed() from None
             log(f"    ! radio doldurulamadı: {e.__class__.__name__}")
-            unanswered.append(question_of(fs) or "radio group")
+            unanswered.append(q or question_of(fs) or "radio group")
     return unanswered
 
 
@@ -604,11 +653,30 @@ YESNO_JS = r"""root => {
     let p = box.parentElement, q = '';
     for (let i = 0; i < 5 && p && !q; i++, p = p.parentElement)
       q = (p.innerText || '').split('\n').map(t).find(l => l && !/^(yes|no|evet|hayır)$/i.test(l)) || '';
-    const picked = btns.some(x => /active|selected/i.test(x.className) || x.getAttribute('aria-pressed') === 'true');
+    const picked = btns.some(x => ['aria-pressed', 'aria-checked', 'aria-selected'].some(a => x.getAttribute(a) === 'true'));
     box.setAttribute('data-yesno', out.length);
     out.push([q, picked]);
   }
   return out;
+}"""
+
+YESNO_SELECTION_JS = r"""box => {
+    const t = s => (s || '').replace(/\s+/g, ' ').trim();
+    const buttons = [...box.querySelectorAll('button')];
+    if (buttons.length !== 2 || !/^(yes|evet)$/i.test(t(buttons[0].innerText))
+        || !/^(no|hayır)$/i.test(t(buttons[1].innerText))) return {question: '', states: []};
+    let p = box.parentElement, question = '';
+    for (let i = 0; i < 5 && p && !question; i++, p = p.parentElement)
+        question = (p.innerText || '').split('\n').map(t).find(l => l && !/^(yes|no|evet|hayır)$/i.test(l)) || '';
+    const states = buttons.map(button => {
+        const signals = ['aria-pressed', 'aria-checked', 'aria-selected'].map(a => button.getAttribute(a)).filter(v => v !== null);
+        if (!signals.length || signals.some(v => v !== 'true' && v !== 'false') || signals.some(v => v !== signals[0])) return null;
+        const selected = signals[0] === 'true';
+        const backing = [...button.querySelectorAll('input[type=radio], input[type=checkbox]')];
+        if (backing.length > 1 || (backing.length === 1 && backing[0].checked !== selected)) return null;
+        return selected;
+    });
+    return {question, states};
 }"""
 
 CHECKGROUP_JS = r"""root => {
@@ -645,16 +713,48 @@ CHECKGROUP_JS = r"""root => {
 def fill_yesno(scope: Locator) -> list[str]:
     unanswered = []
     for i, (q, _picked) in enumerate(scope.evaluate(YESNO_JS)):
-        idx = choose_option(q, ["Yes", "No"])
+        idx = choose_option(q, ["Yes", "No"]) if q.strip() else None
         if idx is None:
             unanswered.append(q or "Yes/No question")
             continue
         try:
-            click_form_control(scope.locator(f"[data-yesno='{i}'] button").nth(idx))
+            group = scope.locator(f"[data-yesno='{i}']")
+            before = group.evaluate(YESNO_SELECTION_JS)
+            if before.get("question") != q or len(before.get("states", [])) != 2:
+                unanswered.append(q)
+                continue
+            if not radio_choice_confirmed(before["states"], idx):
+                click_form_control(group.locator('button').nth(idx))
             pause(0.3, 0.6)
-        except Exception:
+            after = group.evaluate(YESNO_SELECTION_JS)
+            if after.get("question") != q or len(after.get("states", [])) != 2 or not radio_choice_confirmed(after["states"], idx):
+                unanswered.append(q)
+        except Exception as e:
+            if browser_closed(e):
+                raise BrowserClosed() from None
             unanswered.append(q)
     return unanswered
+
+
+def unconfirmed_radio_questions(scope: Locator) -> list[str]:
+    """Recheck choices after other fields/uploads, without changing any answer."""
+    issues = []
+    for group in scope.locator(RADIO_GROUPS).all():
+        q, labels = group.evaluate(RADIO_GROUP_JS)
+        idx = choose_option(q, labels) if q.strip() else None
+        states = group.evaluate(RADIO_SELECTION_JS)
+        if len(states) != len(labels) or not radio_choice_confirmed(states, idx):
+            issues.append(q or "radio group")
+    for i, (q, _picked) in enumerate(scope.evaluate(YESNO_JS)):
+        idx = choose_option(q, ['Yes', 'No']) if q.strip() else None
+        state = scope.locator(f"[data-yesno='{i}']").evaluate(YESNO_SELECTION_JS)
+        if state.get('question') != q or len(state.get('states', [])) != 2 or not radio_choice_confirmed(state['states'], idx):
+            issues.append(q or "Yes/No question")
+    # A preselected radio outside a recognized question group is not a known answer.
+    issues += scope.locator("input[type='radio'], [role='radio']").evaluate_all(r"""els => els
+        .filter(e => !e.closest("fieldset:has(input[type='radio']), [role='radiogroup']"))
+        .map(e => 'unrecognized radio group: ' + (e.name || e.id || 'unknown question'))""")
+    return issues
 
 
 def fill_checkgroups(scope: Locator) -> list[str]:
@@ -1145,6 +1245,7 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
     """
     issues = list(unanswered)
     try:
+        issues += unconfirmed_radio_questions(form)
         issues += form.locator(
             "input, textarea, select, [aria-required='true']:visible"
         ).evaluate_all(r"""els => els.filter(e => {
