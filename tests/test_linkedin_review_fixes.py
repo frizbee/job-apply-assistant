@@ -262,8 +262,20 @@ class ProfileWiringTests(SafetyTest):
         apply.apply_cv_profile(prof)
         self.assertEqual(apply.CFG['search']['keywords'], TARGET_ROLES)
         self.assertEqual(apply.answer('Years of Ruby experience?', numeric=True), ['14'])
-        self.assertEqual(apply.job_ok('Senior Software Engineer', 'Example', ''), 'stack_unknown')
+        self.assertIsNone(apply.job_ok('Senior Software Engineer', 'Example', ''))
         self.assertIsNone(apply.job_ok('Senior Ruby on Rails Developer', 'Example', 'Ruby on Rails backend'))
+
+    def test_unknown_stack_proceeds_but_explicit_exclusions_still_block(self):
+        apply.CFG['filters'].update(title_include=['engineer'], title_require=[], title_exclude=[],
+                                    description_exclude=[], exclude_companies=[])
+        apply.SETTINGS.update(target_technologies=['Ruby'], excluded_technologies=[], excluded_title_words=[])
+        for description in ['', 'Build backend services', 'Required skills: .NET and C#']:
+            self.assertIsNone(apply.job_ok('Senior Engineer', 'Example', description))
+        apply.SETTINGS['excluded_technologies'] = ['.NET']
+        self.assertEqual(apply.job_ok('Senior Engineer', 'Example', 'Required skills: .NET'), 'excluded_technology')
+        apply.SETTINGS['excluded_title_words'] = ['Python']
+        self.assertEqual(apply.job_ok('Senior Python Engineer', 'Example', ''), 'title_keyword_excluded')
+        self.assertEqual(apply.job_ok('', 'Example', ''), 'identity_unknown')
 
 
 @unittest.skipUnless(os.getenv('AUTOAPPLY_BROWSER_TESTS') == '1', 'optional local Chrome current-LinkedIn fixtures')

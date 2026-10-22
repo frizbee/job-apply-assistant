@@ -1854,7 +1854,10 @@ def job_ok(title: str, company: str, description: str) -> str | None:
         return "description_excluded"
     if any(c.lower() in company.lower() for c in f.get("exclude_companies", [])):
         return "company_excluded"
-    return job_relevance.reason(title, description, **technology_filters())
+    reason = job_relevance.reason(title, description, **technology_filters())
+    # Targets are advisory: missing stack evidence must not block processing.
+    # Explicit user exclusions still reject the vacancy normally.
+    return None if reason == 'stack_unknown' else reason
 
 
 def technology_filters() -> dict:
@@ -2124,6 +2127,7 @@ def selected_locations() -> list[str]:
 def apply_cv_profile(prof: dict) -> None:
     """Apply the reviewed CV profile to search settings, filters and form answers."""
     from cv_profile import validate
+    from phone_contact import split_phone
     validate(prof)
     for k in ("first_name", "last_name", "email", "phone_intl", "city", "country", "current_title", "cover_letter"):
         PROFILE[k] = prof[k]  # Empty validated fields must not retain another CV's answers.
@@ -2135,10 +2139,9 @@ def apply_cv_profile(prof: dict) -> None:
     PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}".strip()
     PROFILE.update(phone="", country_code="")
     if prof.get("phone_intl"):
-        # Derive the local number when country code is a separate field: "+90 534 ..." -> "534...".
-        PROFILE["phone"] = re.sub(r"\D", "", re.sub(r"^\+\d{1,3}[\s-]", "", prof["phone_intl"]))
-        code = re.match(r"\+(\d{1,3})[\s-]", prof["phone_intl"])
-        PROFILE["country_code"] = f"(+{code.group(1)})" if code else ""
+        code, number = split_phone(prof['phone_intl'])
+        PROFILE['phone'] = number
+        PROFILE['country_code'] = f'({code})' if code else ''
     years = prof["total_years"]
     search = CFG["search"]
     search["keywords"] = SETTINGS.get('job_search_titles') or prof["job_titles"]

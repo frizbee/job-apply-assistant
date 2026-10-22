@@ -245,6 +245,30 @@ class ProfileBoundaryTests(SafetyTest):
         finalize.assert_called_once()
         self.thread.return_value.start.assert_called_once()
 
+    def test_explicit_phone_parts_replace_old_unsplit_phone_without_guessing(self):
+        body = self.body()
+        body['profile']['phone_intl'] = '+905551234567'
+        body.update(phone_country_code='+90', phone_national='555 123 45 67')
+        with patch.object(apply, 'finalize_settings'):
+            self.assertEqual(gui.start(body), {'ok': True})
+        stored = apply.SETTINGS['cv_profile']
+        self.assertEqual(stored['phone_intl'], '+90 5551234567')
+        apply.apply_cv_profile(stored)
+        self.assertEqual(apply.PROFILE['phone'], '5551234567')
+        self.assertEqual(apply.PROFILE['country_code'], '(+90)')
+        self.assertEqual(apply.PROFILE['phone_intl'], '+90 5551234567')
+
+    def test_invalid_or_partial_phone_parts_do_not_publish_settings(self):
+        before = copy.deepcopy(apply.SETTINGS)
+        for code, number in [('', '5551234567'), ('+90', ''), (None, '123'),
+                             ('+000', '123'), ('+90', '+905551234567'), ('+90', '123x45'),
+                             ('+90', '1' * 14)]:
+            body = self.body()
+            body.update(phone_country_code=code, phone_national=number)
+            self.assertEqual(gui.start(body)['error'], 'invalid_profile')
+            self.assertEqual(apply.SETTINGS, before)
+        self.thread.assert_not_called()
+
     def test_gui_salary_rejects_invalid_values_without_changing_settings(self):
         before = copy.deepcopy(apply.SETTINGS)
         for field, value in [('currency', 'XYZ'), ('salary', '-5000'), ('salary', '5,000'),

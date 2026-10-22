@@ -1,7 +1,7 @@
 """Technology filtering driven exclusively by user-reviewed GUI settings."""
 import re
 
-VERSION = 'user-filters-v2'
+VERSION = 'user-filters-v3-advisory-targets'
 FIELDS = ('target_technologies', 'excluded_technologies')
 USER_FIELDS = (*FIELDS, 'excluded_title_words')
 REQUIRED = re.compile(r'\brequired\b|\bmust\b|\bmandatory\b|\bproficien|\bstrong (?:experience|knowledge)|\bexperience (?:with|in)|\bexpertise in|\b(?:build|develop|work).*\b(?:using|with|in)\b|requisito|obligatorio|experiencia (?:en|con)|experiência (?:em|com)', re.I)
@@ -41,7 +41,8 @@ def assess(title: str, description: str, *, target_technologies=(), excluded_tec
 
     Targets mean at least one selected technology in the title/core description.
     Exclusions apply to titles and mandatory requirements, never optional skills.
-    Missing evidence is manual review, not proof of an incompatible skill set.
+    Missing evidence is diagnostic only, not proof of an incompatible skill set.
+    The application gate processes stack_unknown normally; explicit exclusions block.
     """
     targets = list(target_technologies)
     excluded = list(excluded_technologies)

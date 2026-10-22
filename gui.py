@@ -277,6 +277,14 @@ def _prepare_start(body: dict) -> dict:
         return {'error': 'cv_changed'}
     cached = s.get('cv_profile') if s.get('cv_hash') == digest else None
     prof = {**cv_profile.empty_profile(), **(cached if cv_profile.valid(cached) else {}), **body["profile"]}
+    # New UI supplies separately reviewed phone components. Older clients can
+    # still provide phone_intl; no calling code is guessed from an old number.
+    if 'phone_country_code' in body or 'phone_national' in body:
+        from phone_contact import join_phone
+        try:
+            prof['phone_intl'] = join_phone(body.get('phone_country_code'), body.get('phone_national'))
+        except ValueError as e:
+            return {'error': 'invalid_profile', 'detail': str(e)}
     # The HTML experience input is text; only this transport field is normalized.
     years = prof["total_years"]
     if isinstance(years, str):
@@ -449,7 +457,9 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
     <div><label data-t="first_name"></label><input type="text" id="first_name"></div>
     <div><label data-t="last_name"></label><input type="text" id="last_name"></div>
     <div><label data-t="email"></label><input type="text" id="email"></div>
-    <div><label data-t="phone"></label><input type="text" id="phone_intl" placeholder="+90 555 000 00 00"></div>
+    <div><label data-t="phone_country_code"></label><input type="tel" id="phone_country_code" placeholder="+90"></div>
+    <div><label data-t="phone_national"></label><input type="tel" id="phone_national" placeholder="555 000 00 00"></div>
+    <div><label data-t="phone_saved"></label><input type="text" id="phone_intl" readonly><p class="hint" data-t="phone_split_hint"></p></div>
     <div><label data-t="city"></label><input type="text" id="city"></div>
     <div><label data-t="country"></label><input type="text" id="country"></div>
     <div><label>LinkedIn</label><input type="text" id="linkedin"></div>
@@ -502,9 +512,9 @@ const T = {
   key_s3:"Click \"Copy\" in the window that shows your new key (it is shown only once) and paste it below. Then click \"Read my CV\".", key_open:"Open OpenRouter",
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
-  first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
+  first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", phone_country_code:"Phone country calling code", phone_national:"Phone number (without country calling code)", phone_saved:"Previously saved full phone number", phone_split_hint:"Confirm the calling code and remaining number separately. An unsplit old number is shown for reference only; no code is guessed from your location.", city:"City, Country", country:"Country", github:"GitHub / portfolio",
   titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
-  target_technologies:"Target technologies (one per line; any one matches)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Both lists are optional and start empty. Exclusions match the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
+  target_technologies:"Target technologies (one per line; advisory)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Missing target technology evidence does not block application processing. Explicit exclusions still apply to the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
   excluded_title_words:"Excluded words / phrases in job titles (one per line)", excluded_title_hint:"Optional; empty means no exclusions. Matches only the job title, not the description. Literal, case-insensitive terms, not regex; no built-in list.",
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
    salary_hint:"Monthly amounts; use a decimal point, no grouping separators. Leave blank if unknown. Automatic answers require an explicit currency and period, and valid exchange rates when converting. Hourly/daily conversions use 2080 hours/220 days per year. Otherwise manual review is required.",
@@ -528,9 +538,9 @@ const T = {
   key_s3:"Yeni anahtarın gösterildiği penceredeki \"Copy\" butonuna bas (sadece bir kez gösterilir) ve aşağıya yapıştır. Sonra \"CV'mi oku\" butonuna bas.", key_open:"OpenRouter'ı aç",
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
-  first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
+  first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", phone_country_code:"Telefon ülke arama kodu", phone_national:"Telefon numarası (ülke arama kodu olmadan)", phone_saved:"Önceden kaydedilmiş tam telefon numarası", phone_split_hint:"Arama kodunu ve kalan numarayı ayrı ayrı doğrulayın. Eski numara yalnızca referans içindir; konumunuzdan kod tahmin edilmez.", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
   titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
-  target_technologies:"Hedef teknolojiler (her satıra bir tane; biri yeterli)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"İki liste de isteğe bağlıdır ve boş başlar. Hariç tutma, isteğe bağlı becerilere değil pozisyon başlığına veya zorunlu gereksinimlere uygulanır. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
+  target_technologies:"Hedef teknolojiler (her satıra bir tane; bilgi amaçlı)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"Hedef teknoloji kanıtının bulunmaması başvurunun işlenmesini engellemez. Açık hariç tutmalar pozisyon başlığına veya zorunlu gereksinimlere uygulanır; isteğe bağlı becerilere uygulanmaz. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
   excluded_title_words:"Pozisyon başlığında hariç tutulan kelimeler / ifadeler (her satıra bir tane)", excluded_title_hint:"İsteğe bağlı; boş liste hariç tutmaz. Yalnızca başlıkta aranır, açıklamada değil. Büyük/küçük harfe duyarsızdır; regex veya yerleşik liste değildir.",
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
    salary_hint:"Aylık tutarlar; ondalık nokta kullan, binlik ayırıcı kullanma. Bilinmiyorsa boş bırak. Otomatik yanıt için açık para birimi/dönem ve dönüşümde geçerli kur gerekir. Saatlik/günlük dönüşüm yılda 2080 saat/220 gün kullanır. Aksi durumda manuel kontrol gerekir.",
@@ -580,6 +590,9 @@ function err(id, r) { msg(id, t("err_" + r.error) + (r.detail ? " (" + r.detail 
 function fill(p, show = true) {
   p = p || {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) $(k).value = p[k] ?? "";
+  const parts = (p.phone_intl || "").match(/^\s*\+([1-9]\d{0,2})[\s-]+([\d\s().-]+)\s*$/);
+  $("phone_country_code").value = parts ? "+" + parts[1] : "";
+  $("phone_national").value = parts ? parts[2].replace(/\D/g, "") : "";
   $("job_titles").value = (p.job_titles || []).join("\n");
   if (show) { $("s2").classList.remove("hidden"); $("s3").classList.remove("hidden"); }
 }
@@ -639,6 +652,7 @@ $("start").onclick = async () => {
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
   const body = { profile, cv_hash: S.cv_hash, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+    phone_country_code: $("phone_country_code").value.trim(), phone_national: $("phone_national").value.trim(),
     target_technologies: lines("target_technologies"), excluded_technologies: lines("excluded_technologies"),
     excluded_title_words: lines("excluded_title_words"),
     salary_eur: $("salary_eur").value, salary_usd: $("salary_usd").value, notice: $("notice").value, english: $("english").value,
