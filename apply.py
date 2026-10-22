@@ -36,6 +36,7 @@ import llm_credentials
 import job_metadata
 import job_relevance
 import job_rechecks
+import linkedin_search
 from run_metrics import RunMetrics
 
 METRICS = RunMetrics()
@@ -1747,16 +1748,7 @@ def search_url(keyword: str, location: str) -> str:
     return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
 
 
-SCRAPE_IDS_JS = """async () => {
-    const cards = [...document.querySelectorAll('[data-occludable-job-id], [data-job-id]')];
-    for (const c of cards) { c.scrollIntoView(); await new Promise(r => setTimeout(r, 120)); }
-    const ids = cards.map(c => c.getAttribute('data-occludable-job-id') || c.getAttribute('data-job-id'));
-    for (const a of document.querySelectorAll('a[href*="/jobs/view/"], a[href*="currentJobId="]')) {
-        const m = a.href.match(/jobs\\/view\\/(\\d+)|currentJobId=(\\d+)/);
-        if (m) ids.push(m[1] || m[2]);
-    }
-    return ids;
-}"""
+SCRAPE_IDS_JS = 'async () => (await (' + linkedin_search.COLLECT_JS + ')()).ids'
 
 
 def open_list(page: Page, url: str) -> list[str] | None:
@@ -1776,16 +1768,32 @@ def open_list(page: Page, url: str) -> list[str] | None:
 def job_lists(page: Page):
     """Search only the regions selected by the user, not personalized feeds."""
     locations = selected_locations()
-    for kw in CFG["search"]["keywords"]:
-        for loc in locations:
-            for p in range(CFG["search"]["pages_per_search"]):
-                found = open_list(page, search_url(kw, loc) + f"&start={p * 25}")
-                if found is None:
-                    break
-                log(f"  '{kw}' @ {loc}, page {p + 1}: {len(found)} jobs")
-                yield found
-                if len(found) < 25:
-                    break
+    search = linkedin_search.LinkedInSearch(page, sys.modules[__name__])
+    unsupported = set()
+    try:
+        for kw in CFG['search']['keywords']:
+            for loc in locations:
+                key = f'linkedin:{kw}:{loc}'
+                if loc in unsupported:
+                    METRICS.mark('searches_failed', key)
+                    continue
+                for index in range(CFG['search']['pages_per_search']):
+                    try:
+                        result = search.search_page(kw, loc, index)
+                    except linkedin_search.SearchUnavailable as e:
+                        METRICS.mark('searches_failed', key)
+                        log(f'  ! LinkedIn search not applied: {kw!r} @ {loc!r}: {e}')
+                        if isinstance(e, linkedin_search.UnsupportedLocation):
+                            unsupported.add(loc)
+                        break
+                    METRICS.mark('searches_verified', key)
+                    found = result['ids']
+                    log(f"  '{kw}' @ {loc}, page {index + 1}: {len(found)} jobs (region verified)")
+                    yield found
+                    if result['has_next'] is False or (result['has_next'] is None and len(found) < 25):
+                        break
+    finally:
+        search.close()
 
 
 def first_text(page: Page, selectors: list[str]) -> str:
@@ -1809,11 +1817,14 @@ DESC_JS = """() => {
 def job_info(page: Page) -> tuple[str, str, str]:
     """Use the current job card, never an assumed tab-title order."""
     details = {}
-    for attempt in range(3):
+    for attempt in range(5):
         details = page.evaluate(job_metadata.DETAILS_JS)
-        if details.get('title') and details.get('company'):
+        description = details.get('description', '').strip()
+        if description.casefold() in ('about the job', 'about this job'):
+            details['description'] = ''
+        if details.get('title') and details.get('company') and details.get('description'):
             break
-        if attempt < 2:
+        if attempt < 4:
             page.wait_for_timeout(1000)
     title, company, description = details.get('title', ''), details.get('company', ''), details.get('description', '')
     if not title or not company or not description:

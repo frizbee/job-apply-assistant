@@ -246,9 +246,11 @@ class ProfileWiringTests(SafetyTest):
         apply.SETTINGS['locations'] = regions
         apply.PROFILE['country'] = 'Argentina'
         apply.CFG['search'].update(keywords=['Ruby Developer'], pages_per_search=1)
-        with patch.object(apply, 'open_list', return_value=['123']) as open_list:
+        with patch.object(apply.linkedin_search, 'LinkedInSearch') as factory:
+            factory.return_value.search_page.return_value = {'ids': ['123'], 'has_next': False}
             self.assertEqual(list(apply.job_lists(object())), [['123']] * len(regions))
-        urls = [call.args[1] for call in open_list.call_args_list]
+        self.assertEqual([call.args[1] for call in factory.return_value.search_page.call_args_list], regions)
+        urls = [apply.search_url('Ruby Developer', region) for region in regions]
         self.assertEqual([parse_qs(urlparse(url).query)['location'][0] for url in urls], regions)
         self.assertTrue(all(urlparse(url).path == '/jobs/search/' for url in urls))
 
@@ -318,6 +320,14 @@ class BrowserLinkedinLayoutTests(SafetyTest):
         self.html = '''<script>setTimeout(()=>document.body.innerHTML='<div id="JobDetails_ManageJobBanner_123"></div><section>Remote<br>Posted 2 days ago</section>', 250)</script>'''
         self.page.goto('https://www.linkedin.com/jobs/view/123/')
         self.assertIsNotNone(job_metadata.page_metadata(self.page, 'linkedin', self.page.url)['posted_at'])
+
+    def test_title_arriving_before_description_does_not_trigger_false_stack_unknown(self):
+        self.load()
+        self.html = self.html.replace('Build SaaS with Ruby on Rails and PostgreSQL.', '')
+        self.html += '''<script>setTimeout(()=>document.querySelector('[data-testid="expandable-text-box"]').textContent='Build with Ruby on Rails',400)</script>'''
+        self.page.goto('https://www.linkedin.com/jobs/view/123/')
+        title, company, description = apply.job_info(self.page)
+        self.assertIn('Ruby on Rails', description)
 
     def test_delayed_date_in_an_already_visible_header_is_waited_for(self):
         self.html = '''<div id="JobDetails_ManageJobBanner_123"></div><section>Remote<p id="date"></p></section>
