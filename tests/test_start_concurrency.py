@@ -285,7 +285,7 @@ class StartConcurrencyTests(SafetyTest):
         self.assertEqual(gui.start(self.body()), {"ok": True})
 
     def test_mode_and_source_settings_are_validated_before_publication(self):
-        for field, bad in [("test_mode", "false"), ("english", "unknown"), ("sources", "linkedin"), ("locations", "Worldwide")]:
+        for field, bad in [("test_mode", "false"), ("english", "unknown"), ("sources", "linkedin"), ("locations", "Worldwide"), ("locations", [])]:
             before = self.snapshot()
             body = self.body()
             body[field] = bad

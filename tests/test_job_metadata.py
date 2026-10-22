@@ -107,12 +107,11 @@ class GateTests(SafetyTest):
         self.assertEqual(self.record.call_args.args[4], "metadata_manual")
         self.assertEqual(self.manual.call_args.args[-1], "posting_date_unknown")
 
-    def test_explicit_location_restriction_uses_common_policy(self):
+    def test_job_location_label_does_not_impose_cv_country_policy(self):
         job = self.job_with()
         job["metadata"]["location"] = "Canada"
         apply.PROFILE["country"] = "Japan"
-        self.assertFalse(apply.check_job_eligibility(job, {}))
-        self.assertEqual(self.record.call_args.args[4], "location_restricted")
+        self.assertTrue(apply.check_job_eligibility(job, {}))
         apply.PROFILE["country"] = "Canada"
         self.assertTrue(apply.check_job_eligibility(job, {}))
 

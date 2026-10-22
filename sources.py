@@ -370,14 +370,13 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     return count
                 if done >= limits.get("per_source", 15) or core.submission_quota_status(name):
                     break
-                prev = applied.get(job["id"])
-                if prev and not core.can_retry(prev["status"]):
+                if not core.should_visit_job(applied, job['id']):
                     continue
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
                     core.log(f"- skip [{reason}] {job['title']} @ {job['company']}")
-                    core.record(applied, job["id"], job["title"], job["company"], reason, job["url"])
+                    core.record_relevance_decision(applied, job['id'], job['title'], job['company'], reason, job['url'])
                     continue
                 metadata = job.get("metadata") or {}
                 # Resolve unknown metadata from this job's detail page, not search cards.
@@ -390,6 +389,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 if not core.check_job_eligibility(job, applied):
                     continue
                 core.log(f"> {job['title']} @ {job['company']} ({name})")
+                core.mark_evaluation_passed(applied, job['id'], job['title'], job['company'], job['url'])
                 try:
                     with core.submission_source(name):
                         status = apply(applied)

@@ -301,7 +301,7 @@ def _prepare_start(body: dict) -> dict:
         return {"error": "invalid_settings", "detail": "settings.test_mode: expected boolean"}
     if not isinstance(sources, list) or any(not isinstance(name, str) or name not in SOURCE_NAMES for name in sources):
         return {"error": "invalid_settings", "detail": "settings.sources: expected known source names"}
-    if not isinstance(locations, list) or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
+    if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
     # Monthly expectations in the user's currency, EUR and USD; annual salary is the FX base.
     cur = body.get("currency")
@@ -326,7 +326,7 @@ def _prepare_start(body: dict) -> dict:
              salary=apply.decimal_text(apply.positive_decimal(monthly[base]) * 12) if monthly else "")
     s.update(cv_profile=prof, cv_hash=digest,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
-             locations=body["locations"] or apply.CFG["search"]["locations"],
+              locations=list(body["locations"]),
               sources=body["sources"], test_mode=body["test_mode"])
     for name in SOURCE_NAMES:
         apply.CFG["sources"][name] = name in body["sources"]

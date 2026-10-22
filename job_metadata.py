@@ -3,7 +3,7 @@ import datetime as dt
 from email.utils import parsedate_to_datetime
 import math
 import re
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urlparse, urljoin
 
 UTC = dt.timezone.utc
 
@@ -20,6 +20,25 @@ def posting_time(value, now: dt.datetime | None = None) -> dt.datetime | None:
         if not isinstance(value, str) or not value.strip():
             return None
         text = value.strip()
+        localized = [
+            (r'hace\s+(\d+)(\+)?\s*(minutos?|horas?|d[ií]as?|semanas?|mes(?:es)?|a[nñ]os?)',
+             {'minuto': 'minute', 'minutos': 'minute', 'hora': 'hour', 'horas': 'hour', 'día': 'day', 'días': 'day', 'dia': 'day', 'dias': 'day', 'semana': 'week', 'semanas': 'week', 'mes': 'month', 'meses': 'month', 'año': 'year', 'años': 'year'}),
+            (r'h[áa]\s+(\d+)(\+)?\s*(minutos?|horas?|dias?|semanas?|m[eê]s(?:es)?|anos?)',
+             {'minuto': 'minute', 'minutos': 'minute', 'hora': 'hour', 'horas': 'hour', 'dia': 'day', 'dias': 'day', 'semana': 'week', 'semanas': 'week', 'mês': 'month', 'meses': 'month', 'ano': 'year', 'anos': 'year'}),
+            (r'(\d+)(\+)?\s*(dakika|saat|gün|hafta|ay|yıl)\s+önce',
+             {'dakika': 'minute', 'saat': 'hour', 'gün': 'day', 'hafta': 'week', 'ay': 'month', 'yıl': 'year'}),
+            (r'(\d+)(\+)?\s*(минут[аыу]?|час(?:а|ов)?|дн(?:я|ей)|день|недел[юьи]|месяц(?:а|ев)?|лет|год(?:а)?)\s+назад',
+             {'минута': 'minute', 'минут': 'minute', 'минуты': 'minute', 'час': 'hour', 'часа': 'hour', 'часов': 'hour', 'день': 'day', 'дня': 'day', 'дней': 'day', 'неделю': 'week', 'недели': 'week', 'недель': 'week', 'месяц': 'month', 'месяца': 'month', 'месяцев': 'month', 'год': 'year', 'года': 'year', 'лет': 'year'}),
+        ]
+        for pattern, units in localized:
+            match = re.search(pattern, text, re.I)
+            if match:
+                if match[2]:
+                    return None
+                unit = units.get(match[3].casefold())
+                return posting_time(f'{match[1]} {unit}s ago', now) if unit else None
+        if re.fullmatch(r'(?:hoy|hoje|bugün|сегодня)', text, re.I):
+            return now - dt.timedelta(days=1)
         if re.fullmatch(r"\d{10}|\d{13}", text):
             return posting_time(int(text), now)
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
@@ -65,7 +84,7 @@ def workplace_kind(*values) -> str | None:
                 kinds.add("hybrid")
             elif re.match(r"^(on[- ]?site|onsite|office[- ]based|not remote)(?:$|\s*[-(:,|])", line):
                 kinds.add("onsite")
-            elif re.match(r"^(remote|telecommute|fully remote|100% remote|work from home|uzaktan)(?:$|\s*[-(:,|])", line):
+            elif re.match(r"^(remote|remoto|en remoto|a distancia|telecommute|fully remote|100% remote|work from home|uzaktan|удал[её]нно)(?:$|\s*[-(:,|])", line):
                 kinds.add("remote")
     # Conflicting evidence must never override an office/hybrid restriction.
     return next((k for k in ("hybrid", "onsite", "remote") if k in kinds), None)
@@ -95,8 +114,40 @@ def merge_metadata(first: dict, second: dict) -> dict:
     times = [p for m in (first, second) if (p := posting_time(m.get("posted_at"))) is not None]
     return {"posted_at": min(times) if times else None,
             "workplace": workplace_kind(first.get("workplace"), second.get("workplace")),
-            "location": first.get("location") or second.get("location") or ""}
+            "location": first.get("location") or second.get("location") or "",
+            'diagnostic': second.get('diagnostic') or first.get('diagnostic')}
 
+
+LINKEDIN_ROOTS_JS = r"""() => {
+    const visible = e => e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+    const roots = [...document.querySelectorAll('.job-details-jobs-unified-top-card, .jobs-unified-top-card, .job-details-fit-level-preferences, .top-card-layout, .topcard')].filter(visible);
+    const id = location.pathname.match(/\/jobs\/view\/(?:[^/]*-)?(\d+)\/?$/)?.[1];
+    const banner = id && document.getElementById('JobDetails_ManageJobBanner_' + id);
+    if (banner && visible(banner.nextElementSibling)) roots.push(banner.nextElementSibling);
+    return [...new Set(roots)];
+}"""
+
+DETAILS_JS = r"""() => {
+    const roots = (""" + LINKEDIN_ROOTS_JS + r""")();
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    let title = '', company = '';
+    const parts = document.title.split('|').map(clean).filter(x => x && x !== 'LinkedIn');
+    for (const root of roots) {
+        company = [...root.querySelectorAll('a[href*="/company/"]')].map(e => clean(e.innerText)).find(Boolean) || company;
+        title = [...root.querySelectorAll('h1, [role=heading][aria-level="1"], .job-details-jobs-unified-top-card__job-title')].map(e => clean(e.innerText)).find(Boolean) || title;
+        if (!title) title = [...root.querySelectorAll('p')].map(e => clean(e.innerText))
+            .find(s => s !== company && (parts.includes(s) || parts.join(' | ').includes(s))) || '';
+        if (title && company) break;
+    }
+    // A tab-title segment alone never establishes identity. Remove a company
+    // prefix only when the employer link corroborates it (QuintoAndar layout).
+    if (title.includes('|') && company && title.split('|')[0].toLowerCase().includes(company.toLowerCase()))
+        title = title.split('|').slice(1).join('|').trim();
+    const id = location.pathname.match(/\/jobs\/view\/(?:[^/]*-)?(\d+)\/?$/)?.[1];
+    const about = id && document.getElementById('JobDetails_AboutTheJob_' + id);
+    const desc = about?.querySelector('[data-testid="expandable-text-box"]') || about || document.querySelector('#job-details, .jobs-description');
+    return {title, company, description: desc?.innerText || '', roots: roots.length};
+}"""
 
 METADATA_JS = r"""source => {
     const postings = [];
@@ -117,15 +168,25 @@ METADATA_JS = r"""source => {
         wellfound: '[data-test="job-header"], [data-testid="job-header"], [data-test="job-detail-header"]',
         indeed: '#jobDetailsSection, #jobLocationText, .jobsearch-JobMetadataFooter, [data-testid="job-age"]'
     };
-    const roots = [...document.querySelectorAll(selectors[source] || '[data-autoapply-job-metadata]')]
+    const roots = source === 'linkedin' ? (""" + LINKEDIN_ROOTS_JS + r""")() : [...document.querySelectorAll(selectors[source] || '[data-autoapply-job-metadata]')]
         .filter(e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
     return {postings, title: document.querySelector('h1')?.innerText || '', labels: roots.map(e => e.innerText),
+        language: document.documentElement.lang, roots: roots.length,
         times: roots.flatMap(e => [...e.querySelectorAll('time[datetime]')].map(t => t.dateTime))};
 }"""
 
 
-def page_metadata(page, source: str, expected_url: str) -> dict:
+def page_metadata(page, source: str, expected_url: str, *, attempts: int = 3) -> dict:
     raw = page.evaluate(METADATA_JS, source)
+    inspections = 1
+    for _ in range(max(0, min(attempts, 5) - 1)):
+        candidates = [*raw.get('labels', []), *raw.get('times', []),
+                      *(p.get('datePosted') for p in raw.get('postings', []))]
+        if any(posting_time(value) is not None for value in candidates):
+            break
+        page.wait_for_timeout(1000)
+        raw = page.evaluate(METADATA_JS, source)
+        inspections += 1
     def identity(url):
         parsed = urlparse(url)
         path = parsed.path.rstrip("/")
@@ -142,8 +203,8 @@ def page_metadata(page, source: str, expected_url: str) -> dict:
     for posting in raw.get("postings", []):
         urls = [posting.get("url"), posting.get("@id"), posting.get("mainEntityOfPage")]
         urls = [u.get("@id") if isinstance(u, dict) else u for u in urls]
-        urls = [u for u in urls if isinstance(u, str) and u.startswith("https://")]
-        if any(identity(u) == expected for u in urls):
+        urls = [urljoin(expected_url, u) for u in urls if isinstance(u, str) and u.strip()]
+        if any(urlparse(u).scheme == 'https' and identity(u) == expected for u in urls):
             matches.append(posting)
         elif not urls:
             anonymous.append(posting)
@@ -160,5 +221,14 @@ def page_metadata(page, source: str, expected_url: str) -> dict:
     restrictions = posting.get("applicantLocationRequirements") or []
     restrictions = restrictions if isinstance(restrictions, list) else [restrictions]
     location = ", ".join(x.get("name", "") for x in restrictions if isinstance(x, dict))
+    header_location = next((line.split('·')[0].strip() for label in labels for line in label.splitlines()
+                            if '·' in line and posting_time(line) is not None), '')
     return {"posted_at": posted,
-            "workplace": workplace_kind(posting.get("jobLocationType"), *labels), "location": location}
+            "workplace": workplace_kind(posting.get("jobLocationType"), *labels), "location": location or header_location,
+            'title': posting.get('title', ''),
+            'company': (posting.get('hiringOrganization') or {}).get('name', '') if isinstance(posting.get('hiringOrganization'), dict) else '',
+            'description': posting.get('description', ''),
+            'diagnostic': {'language': raw.get('language', ''), 'header_roots': raw.get('roots', len(labels)),
+                           'inspections': inspections,
+                           'jsonld_postings': len(raw.get('postings', [])), 'date_evidence': [v[:250] for v in dates if isinstance(v, str) and posting_time(v) is not None],
+                           'reason': None if posted else 'No parseable date in matched job header/structured data after bounded hydration wait'}}

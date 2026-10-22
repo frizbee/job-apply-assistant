@@ -44,8 +44,6 @@ search:
   posted_within_hours: 168     # Jobs posted in the last week.
   experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
   pages_per_search: 2          # Pages per search (25 jobs/page).
-  # Restricted locations must match this pattern or the profile's country.
-  accepted_regions: 'anywhere|worldwide|global|europe|emea|\beu\b|cet'
 
 filters:
   # Job titles must match at least one pattern (lowercase regex).
@@ -91,6 +89,14 @@ limits:
   max_applications_per_run: 40   # Submit attempts, including uncertain/rejected; previews in test mode.
   per_source: 15                 # Per-board attempt/preview cap; ATS forms count toward their source board.
   max_runtime_minutes: 90
+
+# Opt-in bounded re-evaluation of pre-submission filtering/manual decisions.
+# Confirmed/pending/uncertain submissions are never eligible for this mechanism.
+rechecks:
+  enabled: false
+  max_per_run: 10
+  max_per_job: 3
+  cooldown_hours: 24
 
 # Personal details are supplied through the GUI/reviewed CV; these are defaults.
 profile:

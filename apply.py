@@ -16,6 +16,7 @@ Environment variables:
 import csv
 import datetime as dt
 import hashlib
+import html
 import json
 import os
 import random
@@ -33,6 +34,8 @@ from urllib.parse import urlencode, urlparse
 import llm_config
 import llm_credentials
 import job_metadata
+import job_relevance
+import job_rechecks
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -107,7 +110,7 @@ QUESTION_JS = r"""el => {
 # Only these explicit pre-submission statuses may be retried on a later run.
 RETRYABLE_STATUSES = frozenset({"modal_not_opened", "blocked", "skipped_no_button", "skipped_no_form",
                                "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error",
-                               "skipped_run_limit", "skipped_source_limit"})
+                               "skipped_run_limit", "skipped_source_limit", "evaluation_passed"})
 LEGACY_UNCERTAIN_STATUSES = frozenset({"skipped_unconfirmed", "external_unconfirmed", "external_unanswered", "skipped_error"})
 UNCERTAIN_STATUSES = frozenset({"submission_pending", "submission_unconfirmed"}) | LEGACY_UNCERTAIN_STATUSES
 
@@ -275,8 +278,17 @@ def applied_elsewhere(applied: dict, title: str, company: str) -> bool:
 
 
 def record(applied: dict, job_id: str, title: str, company: str, status: str, url: str = "") -> None:
-    applied[job_id] = {"status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company),
-                       "title": title, "company": company, "url": url or f"https://www.linkedin.com/jobs/view/{job_id}/"}
+    previous = applied.get(job_id, {})
+    decisions = list(previous.get('decisions', []))
+    if previous and not decisions:
+        decisions.append(job_rechecks.snapshot(previous))
+    applied[job_id] = {**previous, "status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company),
+                       "title": title, "company": company, "url": url or f"https://www.linkedin.com/jobs/view/{job_id}/",
+                       'evaluated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'reason': status,
+                       'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
+    applied[job_id].pop('metadata_diagnostic', None)
+    decisions.append(job_rechecks.snapshot(applied[job_id]))
+    applied[job_id]['decisions'] = decisions
     write_applied(applied)
     new_file = not LOG_FILE.exists()
     with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
@@ -1732,18 +1744,10 @@ def open_list(page: Page, url: str) -> list[str] | None:
 
 
 def job_lists(page: Page):
-    """Yield job lists: the Jobs tab, recommendations, then configured searches."""
-    found = open_list(page, "https://www.linkedin.com/jobs/") or []
-    log(f"  Jobs tab: {len(found)} jobs")
-    yield found
-    for p in range(CFG["search"]["pages_per_search"]):
-        found = open_list(page, f"https://www.linkedin.com/jobs/collections/recommended/?start={p * 24}")
-        if not found:
-            break
-        log(f"  Recommended jobs, page {p + 1}: {len(found)} jobs")
-        yield found
+    """Search only the regions selected by the user, not personalized feeds."""
+    locations = selected_locations()
     for kw in CFG["search"]["keywords"]:
-        for loc in CFG["search"]["locations"]:
+        for loc in locations:
             for p in range(CFG["search"]["pages_per_search"]):
                 found = open_list(page, search_url(kw, loc) + f"&start={p * 25}")
                 if found is None:
@@ -1773,17 +1777,38 @@ DESC_JS = """() => {
 
 
 def job_info(page: Page) -> tuple[str, str, str]:
-    """Return title, company and description; tabs use 'Title | Company | LinkedIn'."""
-    parts = [p.strip() for p in page.title().split("|")]
-    title = parts[0] if len(parts) >= 3 else first_text(page, [".job-details-jobs-unified-top-card__job-title", "h1"])
-    company = parts[1] if len(parts) >= 3 else first_text(page, ["a[href*='/company/']"])
-    return title, company, page.evaluate(DESC_JS)
+    """Use the current job card, never an assumed tab-title order."""
+    details = {}
+    for attempt in range(3):
+        details = page.evaluate(job_metadata.DETAILS_JS)
+        if details.get('title') and details.get('company'):
+            break
+        if attempt < 2:
+            page.wait_for_timeout(1000)
+    title, company, description = details.get('title', ''), details.get('company', ''), details.get('description', '')
+    if not title or not company or not description:
+        structured = job_metadata.page_metadata(page, 'linkedin', page.url, attempts=1)
+        title = title or structured.get('title', '')
+        company = company or structured.get('company', '')
+        description = description or html.unescape(re.sub(r'<[^>]+>', ' ', structured.get('description', '') or ''))
+    return title, company, description
 
 
 def job_ok(title: str, company: str, description: str) -> str | None:
     """Return None for an eligible job, otherwise the rejection reason."""
     f = CFG["filters"]
     t, d = title.lower(), description.lower()
+    if not title.strip() or not company.strip():
+        return 'identity_unknown'
+    if SETTINGS.get('relevance_profile') == 'rails_backend':
+        reason = job_relevance.reason(title, description)
+        if reason:
+            return reason
+        if any(re.search(p, t) for p in f['title_exclude']):
+            return 'title_excluded'
+        if any(re.search(p, d) for p in f.get('description_exclude', [])):
+            return 'description_excluded'
+        return 'company_excluded' if any(c.lower() in company.lower() for c in f.get('exclude_companies', [])) else None
     if not any(re.search(p, t) for p in f["title_include"]):
         return "title_not_relevant"
     if not all(re.search(p, t) for p in f.get("title_require", [])):
@@ -1799,21 +1824,19 @@ def job_ok(title: str, company: str, description: str) -> str | None:
 
 def read_job_metadata(page: Page, source: str, url: str) -> dict:
     try:
-        return job_metadata.page_metadata(page, source, url)
+        result = job_metadata.page_metadata(page, source, url)
+        return result or {'diagnostic': {'reason': 'Requested job URL no longer matches the document (redirect/login/different job)'}}
     except Exception as e:
         if browser_closed(e):
             raise BrowserClosed() from None
         log(f"  ? job metadata unavailable: {e.__class__.__name__}")
-        return {}
+        return {'diagnostic': {'reason': 'Metadata inspection failed', 'error': e.__class__.__name__}}
 
 
 def job_location_ok(text: str) -> bool:
-    """Apply the configured accepted-region policy consistently across sources."""
-    if not text.strip():
-        return True
-    regions = CFG["search"].get("accepted_regions", "anywhere|worldwide|global")
-    country = re.escape(PROFILE.get("country", ""))
-    return bool(re.search(rf"{regions}|{country}" if country else regions, text, re.I))
+    """Queryless feeds must explicitly match a user-selected region label."""
+    return bool(text.strip()) and any(re.search(rf'(?<!\w){re.escape(region)}(?!\w)', text, re.I)
+                                      for region in selected_locations())
 
 
 def check_job_eligibility(job: dict, applied: dict) -> bool:
@@ -1821,17 +1844,64 @@ def check_job_eligibility(job: dict, applied: dict) -> bool:
     search = CFG["search"]
     reason = job_metadata.eligibility_reason(job.get("metadata") or {}, search["posted_within_hours"],
                                              search.get("remote_only", False))
-    if reason is None and not job_location_ok((job.get("metadata") or {}).get("location") or job.get("location", "")):
-        reason = "location_restricted"
+    # A board's location label is not an employment-eligibility rule. Search
+    # regions come from user settings; never infer allowed regions from the CV.
     if reason is None:
         return True
-    unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown")
+    unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown", 'location_unknown')
     status = "metadata_manual" if unknown else reason
     log(f"- skip [{reason}] {job['title']} @ {job['company']}")
     if unknown:
-        record_manual(job["id"], job["title"], job["company"], job["url"], reason)
+        diagnostic = (job.get('metadata') or {}).get('diagnostic')
+        record_manual(job["id"], job["title"], job["company"], job["url"], reason + (': ' + json.dumps(diagnostic, ensure_ascii=False) if diagnostic else ''))
     record(applied, job["id"], job["title"], job["company"], status, job["url"])
+    if applied.get(job['id'], {}).get('decisions'):
+        applied[job['id']]['reason'] = reason
+        applied[job['id']]['metadata_diagnostic'] = (job.get('metadata') or {}).get('diagnostic')
+        applied[job['id']]['decisions'][-1].update(reason=reason, metadata_diagnostic=applied[job['id']]['metadata_diagnostic'])
+        write_applied(applied)
     return False
+
+
+RECHECK_STATE = {'id': secrets.token_hex(8), 'count': 0}
+MANUAL_RELEVANCE = frozenset({'identity_unknown', 'stack_unknown'})
+
+
+def begin_job_rechecks(applied: dict) -> None:
+    RECHECK_STATE.update(id=secrets.token_hex(8), count=0)
+    if SETTINGS.get('recheck_enabled', CFG.get('rechecks', {}).get('enabled', False)):
+        if job_rechecks.prepare(applied, [APPLIED_FILE, LOG_FILE, MANUAL_FILE], HOME / 'data' / 'backups'):
+            write_applied(applied)
+
+
+def should_visit_job(applied: dict, job_id: str) -> bool:
+    previous = applied.get(job_id)
+    if previous is None or can_retry(previous['status']):
+        return True
+    if not SETTINGS.get('recheck_enabled', CFG.get('rechecks', {}).get('enabled', False)):
+        return False
+    options = CFG.get('rechecks', {})
+    if job_rechecks.claim(previous, job_rechecks.revision(CFG, SETTINGS), RECHECK_STATE,
+                          max_per_run=options.get('max_per_run', 10), max_per_job=options.get('max_per_job', 3),
+                          cooldown_hours=options.get('cooldown_hours', 24)):
+        write_applied(applied)
+        return True
+    return False
+
+
+def record_relevance_decision(applied: dict, job_id: str, title: str, company: str, reason: str, url: str) -> None:
+    if reason in MANUAL_RELEVANCE:
+        record_manual(job_id, title, company, url, reason)
+    record(applied, job_id, title, company, 'relevance_manual' if reason in MANUAL_RELEVANCE else reason, url)
+    if applied.get(job_id, {}).get('decisions'):
+        applied[job_id]['reason'] = reason
+        applied[job_id]['decisions'][-1]['reason'] = reason
+        write_applied(applied)
+
+
+def mark_evaluation_passed(applied: dict, job_id: str, title: str, company: str, url: str) -> None:
+    if applied.get(job_id, {}).get('status') in job_rechecks.RECHECKABLE:
+        record(applied, job_id, title, company, 'evaluation_passed', url)
 
 
 # ---------------------------------------------------------------- startup questions
@@ -1889,8 +1959,10 @@ def finalize_settings() -> None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
     current_llm_config(require_model=False)
+    locations = selected_locations()
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2), encoding="utf-8")
     PROFILE["resume_file"] = SETTINGS["resume"]
+    CFG['search']['locations'] = locations
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
     log(f"CV: {Path(SETTINGS['resume']).name} | salary: {', '.join(f'{v} {c}' for c, v in (SETTINGS.get('monthly_salary_by_currency') or {}).items()) + ' /month' if SETTINGS.get('monthly_salary_by_currency') else SETTINGS['salary'] + ' /year'} | "
@@ -1959,7 +2031,7 @@ def cv_setup() -> None:
             print(f"  ! Could not analyze CV ({e.__class__.__name__}: {str(e)[:150]}); using config.yaml.")
             SETTINGS.pop("cv_profile", None)
             return
-    locations = SETTINGS.get("locations") or CFG["search"]["locations"]
+    locations = selected_locations()
     while True:
         show_profile(prof, locations)
         choice = ask("Use this profile? y=yes, t=edit job titles, l=edit locations, n=do not use the CV profile", "y").lower()
@@ -1986,6 +2058,14 @@ def cv_setup() -> None:
             locations = [t.strip() for t in raw.split(",") if t.strip()] or locations
 
 
+def selected_locations() -> list[str]:
+    """Use the user's list verbatim; config is used only if no list was saved."""
+    locations = SETTINGS['locations'] if 'locations' in SETTINGS else CFG['search']['locations']
+    if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
+        raise ValueError('Enter at least one search country / region')
+    return list(locations)
+
+
 def apply_cv_profile(prof: dict) -> None:
     """Apply the reviewed CV profile to search settings, filters and form answers."""
     from cv_profile import validate
@@ -2006,8 +2086,8 @@ def apply_cv_profile(prof: dict) -> None:
         PROFILE["country_code"] = f"(+{code.group(1)})" if code else ""
     years = prof["total_years"]
     search = CFG["search"]
-    search["keywords"] = prof["job_titles"]
-    search["locations"] = SETTINGS.get("locations") or search["locations"]
+    search["keywords"] = SETTINGS.get('job_search_titles') or prof["job_titles"]
+    search["locations"] = selected_locations()
     search["experience_levels"] = [1, 2] if years < 2 else [2, 3, 4] if years < 6 else [3, 4, 5]
     words = {w for t in prof["job_titles"] for w in re.findall(r"[\w+#]+", t.lower()) if len(w) > 1}
     words |= {w.lower() for w in prof["title_keywords"]}
@@ -2016,9 +2096,17 @@ def apply_cv_profile(prof: dict) -> None:
     roles = {re.findall(r"[\w+#]+", t.lower())[-1] for t in prof["job_titles"] if re.findall(r"[\w+#]+", t)}
     roles |= {"engineer", "developer", "scientist", "analyst", "architect", "researcher", "specialist", "lead"} & words
     CFG["filters"]["title_require"] = ["|".join(rf"\b{re.escape(w)}" for w in sorted(roles))] if roles else []
+    if SETTINGS.get('relevance_profile') == 'rails_backend':
+        CFG['filters']['title_include'] = [r'\bruby\b|\brails\b|back[ -]?end|full[ -]?stack|software|technical lead|tech lead']
+        CFG['filters']['title_require'] = [r'\b(?:engineer|developer|lead|leader)\b']
     # Residence does not establish work authorization or willingness to commute.
     # AI-estimated skill years are not shown for confirmation in the GUI.
     # Keep only the user's explicit skill_years configuration, never CV estimates.
+    confirmed = SETTINGS.get('confirmed_skill_years', {})
+    if isinstance(confirmed, dict):
+        for skill, years_confirmed in confirmed.items():
+            if isinstance(skill, str) and skill.strip() and type(years_confirmed) is int and 0 <= years_confirmed <= 80:
+                CFG['skill_years'][re.escape(skill.casefold())] = years_confirmed
 
 
 # ---------------------------------------------------------------- main
@@ -2026,6 +2114,12 @@ def apply_cv_profile(prof: dict) -> None:
 def process_job(page: Page, applied: dict, job_id: str) -> bool:
     """Open and process an eligible job; return True for a confirmed success or preview."""
     try:
+        previous = applied.get(job_id)
+        if previous and not can_retry(previous['status']):
+            authorized_recheck = (previous['status'] in job_rechecks.RECHECKABLE
+                                 and previous.get('recheck', {}).get('run_id') == RECHECK_STATE['id'])
+            if not authorized_recheck:
+                return False
         if submission_quota_status('linkedin'):
             return False
         page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded")
@@ -2034,14 +2128,15 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         reason = job_ok(title, company, desc) or ("applied_elsewhere" if applied_elsewhere(applied, title, company) else None)
         if reason:
             log(f"- skip [{reason}] {title} @ {company}")
-            record(applied, job_id, title, company, reason)
+            record_relevance_decision(applied, job_id, title, company, reason, f'https://www.linkedin.com/jobs/view/{job_id}/')
             return False
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-        job = {"id": job_id, "title": title, "company": company, "url": url,
+        job = {"id": job_id, "title": title, "company": company, "url": url, 'desc': desc,
                "metadata": read_job_metadata(page, "linkedin", url)}
         if not check_job_eligibility(job, applied):
             return False
         log(f"> {title} @ {company}")
+        mark_evaluation_passed(applied, job_id, title, company, url)
         status = apply_to_job(page, job_id, title, company, applied)
         if status == "no_easy_apply" and EXTERNAL:
             status = apply_external(page, job_id, title, company, applied)
@@ -2087,10 +2182,14 @@ def run_linkedin(page: Page, applied: dict, count: int) -> int:
     if not linkedin_login(page):
         return count
     stop = min(CFG["limits"]["max_applications_per_run"], count + CFG["limits"].get("per_source", 15))
+    visited = set()
     try:
         for job_ids in job_lists(page):
             for job_id in job_ids:
-                if job_id in applied and not can_retry(applied[job_id]["status"]):
+                if job_id in visited:
+                    continue
+                visited.add(job_id)
+                if not should_visit_job(applied, job_id):
                     continue
                 if count >= stop or submission_quota_status('linkedin') or time.time() > DEADLINE:
                     raise LimitReached
@@ -2135,6 +2234,7 @@ def run_bot(*, reset_stop: bool = True) -> int:
         log("Stopped before the run started.")
         return 0
     applied = load_applied()
+    begin_job_rechecks(applied)
     # Quota is per run; keep 'last' so restarting does not bypass the cooldown.
     EXT_STATE["count"] = 0
     reset_submission_attempts()
