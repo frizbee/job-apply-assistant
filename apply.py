@@ -28,6 +28,8 @@ import secrets
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -107,7 +109,8 @@ QUESTION_JS = r"""el => {
 
 # Bu durumlarla kaydedilen ilanlar sonraki çalıştırmada tekrar denenir
 RETRYABLE_STATUSES = frozenset({"modal_not_opened", "blocked", "skipped_no_button", "skipped_no_form",
-                               "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error"})
+                               "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error",
+                               "skipped_run_limit", "skipped_source_limit"})
 LEGACY_UNCERTAIN_STATUSES = frozenset({"skipped_unconfirmed", "external_unconfirmed", "external_unanswered", "skipped_error"})
 UNCERTAIN_STATUSES = frozenset({"submission_pending", "submission_unconfirmed"}) | LEGACY_UNCERTAIN_STATUSES
 
@@ -135,6 +138,71 @@ def browser_closed(e: BaseException) -> bool:
 
 class SessionLost(Exception):
     """LinkedIn oturumu sonlandırdı (çerez geçersiz)."""
+
+
+ATTEMPTS = {'total': 0, 'by_source': {}}
+ATTEMPT_LOCK = threading.Lock()
+CURRENT_SUBMISSION_SOURCE = ContextVar('submission_source', default=None)
+SUBMISSION_SOURCES = frozenset({'linkedin', 'indeed', 'wellfound', 'remoteok', 'himalayas', 'weworkremotely'})
+
+
+def source_for_job(job_id: str) -> str:
+    """Company-site submissions belong to their originating board, not the ATS."""
+    source = CURRENT_SUBMISSION_SOURCE.get() or str(job_id).partition(':')[0]
+    source = 'weworkremotely' if source == 'wwr' else source
+    return source if source in SUBMISSION_SOURCES else 'linkedin'
+
+
+@contextmanager
+def submission_source(source: str):
+    token = CURRENT_SUBMISSION_SOURCE.set(source)
+    try:
+        yield
+    finally:
+        CURRENT_SUBMISSION_SOURCE.reset(token)
+
+
+def reset_submission_attempts() -> None:
+    with ATTEMPT_LOCK:
+        ATTEMPTS.update(total=0, by_source={})
+
+
+def _submission_quota_status(source: str | None) -> str | None:
+    limits = CFG['limits']
+    if ATTEMPTS['total'] >= limits['max_applications_per_run']:
+        return 'skipped_run_limit'
+    if source is not None and ATTEMPTS['by_source'].get(source, 0) >= limits.get('per_source', 15):
+        return 'skipped_source_limit'
+    return None
+
+
+def submission_quota_status(source: str | None = None) -> str | None:
+    with ATTEMPT_LOCK:
+        return _submission_quota_status(source)
+
+
+def reserve_submission_attempt(source: str) -> str | None:
+    """Atomically charge a slot before pending persistence or the final click."""
+    with ATTEMPT_LOCK:
+        denied = _submission_quota_status(source)
+        if denied:
+            return denied
+        ATTEMPTS['total'] += 1
+        ATTEMPTS['by_source'][source] = ATTEMPTS['by_source'].get(source, 0) + 1
+    return None
+
+
+def release_submission_attempt(source: str) -> None:
+    """Refund only when the click was definitely never invoked."""
+    with ATTEMPT_LOCK:
+        ATTEMPTS['total'] -= 1
+        ATTEMPTS['by_source'][source] -= 1
+
+
+def preview_application(job_id: str) -> str:
+    if STOP.is_set():
+        raise Stopped
+    return reserve_submission_attempt(source_for_job(job_id)) or 'dry_run'
 
 
 LOG_LINES: list[str] = []  # arayüz buradan okur
@@ -495,6 +563,7 @@ NON_SUBMITTING_CONTROL_JS = r"""el => {
     const submits = e => e && ((e.tagName === 'BUTTON' && (e.type !== 'button' || e.hasAttribute('formaction')))
         || (e.tagName === 'INPUT' && /^(submit|image)$/i.test(e.type)));
     if (submits(el.closest('button, input'))) return false;
+    if (submits(el.parentElement?.closest('button, input'))) return false;
     const label = el.closest('label');
     if (label && submits(label.control)) return false;
     return !el.querySelector("button:not([type='button' i]), button[formaction], input[type='submit' i], input[type='image' i]");
@@ -732,8 +801,7 @@ YESNO_SELECTION_JS = r"""box => {
     return {question, states};
 }"""
 
-CHECKGROUP_JS = r"""root => {
-  // Çoklu seçim soruları: aynı kapta 2+ onay kutusu. [soru, seçenekler, herhangi biri seçili mi]
+CHECKGROUP_STATE_JS = r"""g => {
   const t = s => (s || '').replace(/\s+/g, ' ').trim();
   const label = c => {
     const l = c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`);
@@ -742,22 +810,35 @@ CHECKGROUP_JS = r"""root => {
     while (p && !t(p.innerText)) p = p.parentElement;
     return p ? t(p.innerText) : '';
   };
-  const groups = new Map();
+  const cbs = [...g.querySelectorAll('input[type=checkbox]')];
+  const opts = cbs.map(label);
+  let p = g, q = '';
+  for (let i = 0; i < 4 && p && !q; i++, p = p.parentElement)
+    q = (p.innerText || '').split('\n').map(t).find(l => l && !opts.includes(l)) || '';
+  return {question: q, options: opts,
+    states: cbs.map(c => {
+      const aria = c.getAttribute('aria-checked');
+      return c.indeterminate || (aria !== null && aria !== String(c.checked)) ? null : c.checked;
+    }),
+    disabled: cbs.map(c => c.matches(':disabled') || c.getAttribute('aria-disabled') === 'true')};
+}"""
+
+CHECKGROUP_JS = r"""root => {
+  // Refresh markers: removed/restructured groups must not leave stale exemptions.
+  for (const g of root.querySelectorAll('[data-checkgroup]')) g.removeAttribute('data-checkgroup');
+  const groups = new Set();
   for (const c of root.querySelectorAll('input[type=checkbox]')) {
     let g = c.parentElement;
     while (g && g !== root && g.querySelectorAll('input[type=checkbox]').length < 2) g = g.parentElement;
     if (!g || g === root) continue;
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g).push(c);
+    groups.add(g);
   }
   const out = [];
-  for (const [g, cbs] of groups) {
-    const opts = cbs.map(label);
-    let p = g, q = '';
-    for (let i = 0; i < 4 && p && !q; i++, p = p.parentElement)
-      q = (p.innerText || '').split('\n').map(t).find(l => l && !opts.includes(l)) || '';
+  const inspect = (""" + CHECKGROUP_STATE_JS + r""");
+  for (const g of groups) {
+    const state = inspect(g);
     g.setAttribute('data-checkgroup', out.length);
-    out.push([q, opts, cbs.some(c => c.checked)]);
+    out.push([state.question, state.options, state.states.some(s => s === true)]);
   }
   return out;
 }"""
@@ -810,32 +891,104 @@ def unconfirmed_radio_questions(scope: Locator) -> list[str]:
     return issues
 
 
+def checkbox_choices(question: str, options: list[str]) -> list[int] | None:
+    """A multi-answer is a complete set, never a best-effort subset."""
+    candidates = answer(question) if question.strip() else []
+    if not candidates:
+        return None
+    picks = [match_option([candidate], options) for candidate in candidates]
+    if any(index is None for index in picks) or len(set(picks)) != len(picks):
+        return None
+    return picks
+
+
+def checkbox_group_confirmed(state, picks) -> bool:
+    """Require the exact exclusive set and consistent native/ARIA states."""
+    if not isinstance(state, dict) or not isinstance(picks, list) or not picks:
+        return False
+    options, states, disabled = (state.get(key) for key in ('options', 'states', 'disabled'))
+    if not all(isinstance(values, list) for values in (options, states, disabled)):
+        return False
+    if len(options) < 2 or len(states) != len(options) or len(disabled) != len(options):
+        return False
+    if any(type(index) is not int or not 0 <= index < len(options) for index in picks) or len(set(picks)) != len(picks):
+        return False
+    return all(type(off) is bool and selected is (index in picks) and (index not in picks or not off)
+               for index, (selected, off) in enumerate(zip(states, disabled)))
+
+
+def unconfirmed_checkbox_questions(scope: Locator) -> list[str]:
+    issues = []
+    for i, (q, options, _picked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
+        picks = checkbox_choices(q, options)
+        state = scope.locator(f"[data-checkgroup='{i}']").evaluate(CHECKGROUP_STATE_JS)
+        if (state.get('question') != q or state.get('options') != options
+                or not checkbox_group_confirmed(state, picks)):
+            issues.append(q or 'checkbox group')
+    # A group can shrink to one input after filling. Do not let that remaining
+    # value bypass verification merely because it is no longer a multi-select.
+    for cb in scope.locator("input[type='checkbox']").all():
+        if cb.get_attribute('id') == 'follow-company-checkbox' or cb.is_disabled():
+            continue
+        if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
+            continue
+        q = question_of(cb)
+        pick = choose_option(q, ['Yes', 'No']) if q.strip() else None
+        state = cb.evaluate(r"""c => {
+            const aria = c.getAttribute('aria-checked');
+            return c.indeterminate || (aria !== null && aria !== String(c.checked)) ? null : c.checked;
+        }""")
+        if pick is None or state is not (pick == 0):
+            issues.append(q or 'checkbox')
+    return issues
+
+
 def fill_checkgroups(scope: Locator) -> list[str]:
-    """Select only explicitly configured options; unknown groups need manual review."""
+    """Select a complete confirmed set, then verify the whole group, not just the last click."""
     unanswered = []
     for i, (q, opts, _any_checked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
-        cands = answer(q)
-        pick = [j for c in cands if (j := match_option([c], opts)) is not None]
-        if not pick:
-            unanswered.append(q or "checkbox group")
+        picks = checkbox_choices(q, opts)
+        if picks is None:
+            unanswered.append(q or 'checkbox group')
             continue
-        cbs = scope.locator(f"[data-checkgroup='{i}'] input[type='checkbox']")
-        for j in range(len(opts)):
-            try:
-                cb = cbs.nth(j)
-                wanted = j in pick
+        group = scope.locator(f"[data-checkgroup='{i}']")
+        try:
+            state = group.evaluate(CHECKGROUP_STATE_JS)
+            if (state.get('question') != q or state.get('options') != opts
+                    or len(state.get('states', [])) != len(opts)
+                    or any(type(value) is not bool for value in state['states'])
+                    or len(state.get('disabled', [])) != len(opts)
+                    or any(state['disabled'][index] for index in picks)):
+                unanswered.append(q or 'checkbox group')
+                continue
+            for index in range(len(opts)):
+                state = group.evaluate(CHECKGROUP_STATE_JS)
+                if state.get('question') != q or state.get('options') != opts:
+                    raise ValueError('checkbox options changed during selection')
+                wanted = index in picks
+                cb = group.locator("input[type='checkbox']").nth(index)
                 if cb.is_checked() == wanted:
                     continue
-                row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                if cb.is_disabled() or cb.evaluate(NON_SUBMITTING_CONTROL_JS) is not True:
+                    raise UnsafeFormControl('unsafe or disabled checkbox control')
                 try:
-                    click_form_control(row, timeout=4000)
+                    cb.set_checked(wanted, timeout=2000)
                 except PWTimeout:
-                    cb.set_checked(wanted, force=True)
-                if cb.is_checked() != wanted:
-                    cb.set_checked(wanted, force=True)
-            except Exception as e:
-                log(f"    ! onay kutusu seçilemedi: {e.__class__.__name__}")
-                unanswered.append(q or "checkbox group")
+                    if cb.is_checked() != wanted:
+                        # Hidden native inputs may have a working visible label/row.
+                        row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
+                        click_form_control(row, timeout=2000)
+                        if cb.is_checked() != wanted:
+                            cb.set_checked(wanted, force=True, timeout=2000)
+            state = group.evaluate(CHECKGROUP_STATE_JS)
+            if (state.get('question') != q or state.get('options') != opts
+                    or not checkbox_group_confirmed(state, picks)):
+                unanswered.append(q or 'checkbox group')
+        except Exception as e:
+            if browser_closed(e):
+                raise BrowserClosed() from None
+            log(f"    ! checkbox selection unconfirmed: {e.__class__.__name__}")
+            unanswered.append(q or 'checkbox group')
     return unanswered
 
 
@@ -851,35 +1004,70 @@ def standard_answer(el: Locator, q: str) -> str | None:
     return None
 
 
+TEXT_FIELDS = (
+    "input[type='text']:visible, input[type='tel']:visible, input[type='email']:visible, "
+    "input[type='number']:visible, input[type='url']:visible, input[type='date']:visible, "
+    "input:not([type]):visible, textarea:visible"
+)
+
+
+def text_field_candidates(el: Locator, q: str, *, external: bool) -> list[str]:
+    # An exact user-confirmed answer also overrides generic identity-field rules.
+    if any(key.strip().casefold() == q.strip().casefold() for key in CFG.get('confirmed_answers', {})):
+        return answer(q, numeric=el.get_attribute('type') == 'number')
+    std = standard_answer(el, q) if external else None
+    if std:
+        return [std]
+    numeric = el.get_attribute('type') == 'number' or 'numeric' in (el.get_attribute('id') or '')
+    return answer(q, numeric=numeric)
+
+
+def text_value_confirmed(value: str, candidates: list[str], *, numeric: bool = False) -> bool:
+    """Accept only a known value, not merely nonempty/native-valid text."""
+    value = value.replace('\r\n', '\n').strip()
+    if not value:
+        return False
+    if numeric:
+        number = re.compile(r'\d+(?:\.\d+)?')
+        return bool(number.fullmatch(value)) and any(
+            number.fullmatch(candidate.strip()) and Decimal(value) == Decimal(candidate.strip())
+            for candidate in candidates)
+    return any(value == candidate.replace('\r\n', '\n').strip() for candidate in candidates)
+
+
+def unconfirmed_text_questions(scope: Locator, *, external: bool) -> list[str]:
+    """Read values again after other fields/uploads; never silently repair prefills."""
+    issues = []
+    for el in scope.locator(TEXT_FIELDS).all():
+        if el.is_disabled():
+            continue  # Disabled controls are not submitted by native forms.
+        q = question_of(el)
+        candidates = text_field_candidates(el, q, external=external)
+        if not text_value_confirmed(el.input_value(), candidates, numeric=el.get_attribute('type') == 'number'):
+            issues.append(q or 'text field')
+    return issues
+
+
 def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
-    """Formdaki boş alanları doldurur; cevaplanamayan soruları döndürür."""
+    """Fill empty fields and verify answers; nonempty text is not confirmation."""
     unanswered: list[str] = []
     # Metin alanları
-    fields = modal.locator(
-        "input[type='text']:visible, input[type='tel']:visible, input[type='email']:visible, "
-        "input[type='number']:visible, input[type='url']:visible, input[type='date']:visible, "
-        "input:not([type]):visible, textarea:visible"
-    )
+    fields = modal.locator(TEXT_FIELDS)
     for el in fields.all():
         try:
             if not el.is_editable(timeout=2000):
                 continue
-            invalid = el.get_attribute("aria-invalid") == "true"
-            if el.input_value().strip() and not invalid:
-                continue
             q = question_of(el)
+            cands = text_field_candidates(el, q, external=external)
+            numeric = el.get_attribute('type') == 'number'
+            if el.input_value().strip():
+                if not text_value_confirmed(el.input_value(), cands, numeric=numeric):
+                    unanswered.append(q or 'text field')
+                continue
             if external and el.get_attribute("role") == "combobox":
-                if not fill_combobox(page, el, q):
+                if not fill_combobox(page, el, q) or not text_value_confirmed(el.input_value(), cands, numeric=numeric):
                     unanswered.append(q)
                 continue
-            std = standard_answer(el, q) if external else None
-            if std:
-                el.fill(std)
-                pause(0.3, 0.8)
-                continue
-            numeric = el.get_attribute("type") == "number" or "numeric" in (el.get_attribute("id") or "")
-            # Dolu ama geçersiz alan genelde sayı bekliyor
-            cands = answer(q, numeric=numeric or invalid)
             if not cands:
                 log(f"    ? cevapsız soru: {q[:90]}")
                 unanswered.append(q)
@@ -894,6 +1082,8 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     unanswered.append(q)
                 else:
                     click_form_control(sugg.nth(idx))
+            if not text_value_confirmed(el.input_value(), cands, numeric=numeric):
+                unanswered.append(q or 'text field')
         except Exception as e:
             if browser_closed(e):
                 raise BrowserClosed() from None
@@ -1047,7 +1237,7 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
     if STOP.is_set():
         raise Stopped
     if DRY_RUN:
-        return "dry_run"  # Defense in depth, even if a caller misses its own check.
+        return preview_application(job_id)  # Defense in depth, including the preview budget.
     state = applied if applied is not None else load_applied()
     previous = state.get(job_id)
     if previous and not can_retry(previous["status"]):
@@ -1057,12 +1247,22 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
             record_manual(job_id, title, company, url, "previous uncertain attempt: check application history before retrying")
             return "submission_unconfirmed"
         return previous["status"]
+    source = source_for_job(job_id)
+    denied = reserve_submission_attempt(source)
+    if denied:
+        return denied
     # Persist before clicking: even a process crash must not cause a blind retry.
-    record(state, job_id, title, company, "submission_pending", url)
+    try:
+        record(state, job_id, title, company, "submission_pending", url)
+    except BaseException:
+        release_submission_attempt(source)
+        raise
     status = "submission_unconfirmed"
+    click_invoked = False
     try:
         if STOP.is_set():
             raise Stopped
+        click_invoked = True
         primary.click()
         result = wait_result()
         if result in ("applied", "applied_external", "submission_rejected"):
@@ -1072,6 +1272,8 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
             raise BrowserClosed() from None
         log(f"  ! submission outcome unknown: {e.__class__.__name__}")
     finally:
+        if not click_invoked:
+            release_submission_attempt(source)
         # Also runs for STOP/BrowserClosed (BaseException), preserving uncertainty.
         record(state, job_id, title, company, status, url)
         if status not in ("applied", "applied_external"):
@@ -1152,7 +1354,7 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
             if DRY_RUN:
                 screenshot(page, f"{job_id}_dryrun")
                 discard(page)
-                return "dry_run"
+                return preview_application(job_id)
             return submit_linkedin(page, modal, primary, job_id, title, company, applied)
 
         if action != "next":
@@ -1290,15 +1492,17 @@ def record_manual(job_id: str, title: str, company: str, url: str, reason: str) 
 
 
 def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_id: str,
-                          title: str, company: str, url: str = "") -> bool:
+                          title: str, company: str, url: str = "", *, external: bool = False) -> bool:
     """Fail closed before advancing/submitting, including when form inspection fails.
 
-    Unknown questions are conservative: even optional ones block unless already filled.
+    Unknown questions are conservative: even optional/prefilled text needs confirmation.
     Native validation also catches unsupported required fields and failed file uploads.
     """
     issues = list(unanswered)
     try:
+        issues += unconfirmed_text_questions(form, external=external)
         issues += unconfirmed_radio_questions(form)
+        issues += unconfirmed_checkbox_questions(form)
         issues += form.locator(
             "input, textarea, select, [aria-required='true']:visible"
         ).evaluate_all(r"""els => els.filter(e => {
@@ -1419,6 +1623,9 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str, appl
     if not EXTERNAL:
         record_manual(job_id, title, company, url, "external_disabled")
         return "external_manual"
+    denied = submission_quota_status(source_for_job(job_id))
+    if denied:
+        return denied
     if EXT_STATE["count"] >= ext.get("max_per_run", 5):
         return "skipped_external_limit"  # sonraki çalıştırmada tekrar denenir
     form_url, ats = ats_apply_url(page, url)
@@ -1460,7 +1667,7 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
     check_ats_form(page, document, form, ats)
     unanswered += fill_step(page, form, external=True)  # açılan koşullu sorular için ikinci tur
     check_ats_form(page, document, form, ats)
-    if require_manual_review(page, form, unanswered, job_id, title, company, form_url):
+    if require_manual_review(page, form, unanswered, job_id, title, company, form_url, external=True):
         return "manual_review"
 
     submit = form.locator("button[type='submit']:visible, input[type='submit']:visible")
@@ -1472,7 +1679,7 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
         return "external_manual"
     if DRY_RUN:
         screenshot(page, f"{job_id}_ext_dryrun")
-        return "dry_run"
+        return preview_application(job_id)
 
     check_ats_form(page, document, form, ats)
     before = application_submission_signals(page)
@@ -1820,6 +2027,8 @@ def apply_cv_profile(prof: dict) -> None:
 def process_job(page: Page, applied: dict, job_id: str) -> bool:
     """İlanı açar, uygunsa başvurur. Başvuru yapıldıysa True."""
     try:
+        if submission_quota_status('linkedin'):
+            return False
         page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded")
         pause(2.5, 4.5)
         title, company, desc = job_info(page)
@@ -1874,6 +2083,8 @@ def linkedin_login(page: Page) -> bool:
 
 
 def run_linkedin(page: Page, applied: dict, count: int) -> int:
+    if submission_quota_status('linkedin') or count >= CFG['limits']['max_applications_per_run']:
+        return count
     if not linkedin_login(page):
         return count
     stop = min(CFG["limits"]["max_applications_per_run"], count + CFG["limits"].get("per_source", 15))
@@ -1882,10 +2093,11 @@ def run_linkedin(page: Page, applied: dict, count: int) -> int:
             for job_id in job_ids:
                 if job_id in applied and not can_retry(applied[job_id]["status"]):
                     continue
-                if count >= stop or time.time() > DEADLINE:
+                if count >= stop or submission_quota_status('linkedin') or time.time() > DEADLINE:
                     raise LimitReached
-                if process_job(page, applied, job_id):
-                    count += 1
+                with submission_source('linkedin'):
+                    if process_job(page, applied, job_id):
+                        count += 1
     except LimitReached:
         log("Günlük limit/süre doldu.")
     except SessionLost:
@@ -1926,6 +2138,7 @@ def run_bot(*, reset_stop: bool = True) -> int:
     applied = load_applied()
     # Quota is per run; keep 'last' so restarting does not bypass the cooldown.
     EXT_STATE["count"] = 0
+    reset_submission_attempts()
     log(f"Başlıyor ({'test modu, başvuru gönderilmez' if DRY_RUN else 'gerçek başvuru'}), daha önce işlenen ilan: {len(applied)}")
     count = 0
     with sync_playwright() as pw:
@@ -1948,8 +2161,8 @@ def run_bot(*, reset_stop: bool = True) -> int:
                 ctx.close()
             except Exception:
                 pass
-    LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count}\n", encoding="utf-8")
-    log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count}")
+    LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count} attempts={ATTEMPTS['total']}\n", encoding="utf-8")
+    log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count} | {'previews' if DRY_RUN else 'Submit attempts'}: {ATTEMPTS['total']}")
     return 0
 
 

@@ -1,6 +1,7 @@
 """Concurrent GUI requests cannot change an accepted run or create extra workers."""
 import base64
 import copy
+import hashlib
 from pathlib import Path
 from queue import Queue
 import tempfile
@@ -49,7 +50,8 @@ class StartConcurrencyTests(SafetyTest):
         prof = cv_profile.empty_profile()
         prof.update(first_name="Test", last_name="User", email="test@example.com", phone_intl="+1 555 123 4567",
                     city="Toronto", country="Canada", total_years=3, job_titles=["Software Engineer"])
-        return {"profile": prof, "english": "3", "notice": "14", "locations": ["Worldwide"],
+        return {"profile": prof, "cv_hash": hashlib.sha256(self.resume.read_bytes()).hexdigest(),
+                "english": "3", "notice": "14", "locations": ["Worldwide"],
                 "sources": ["linkedin"] if test_mode else ["indeed"], "test_mode": test_mode,
                 "currency": "USD", "salary": "5000", "salary_eur": "4500", "salary_usd": "5000"}
 

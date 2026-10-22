@@ -60,8 +60,8 @@ external:
   min_wait_seconds: 180     # iki şirket formu arası bekleme
 
 limits:
-  max_applications_per_run: 40   # tüm kaynaklar toplamı
-  per_source: 15                 # tek kaynaktan en fazla
+  max_applications_per_run: 40   # tüm kaynaklar: Submit denemeleri (belirsiz/reddedilen dahil); test modunda önizlemeler
+  per_source: 15                 # tek kaynak için aynı deneme/önizleme sınırı; ATS kaynak platforma sayılır
   max_runtime_minutes: 90
 
 # Kişisel bilgiler arayüzden / CV'den doldurulur; burada sadece varsayılanlar var.

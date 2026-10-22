@@ -197,7 +197,8 @@ class ProfileBoundaryTests(SafetyTest):
         # These hidden fields are intentionally not sent by the actual UI.
         visible = {k: v for k, v in profile().items() if k not in ("skills", "title_keywords", "current_title")}
         visible["total_years"] = "3"
-        return {"profile": visible, "english": "3", "notice": "14", "locations": ["Worldwide"],
+        return {"profile": visible, "cv_hash": hashlib.sha256(self.resume.read_bytes()).hexdigest(),
+                "english": "3", "notice": "14", "locations": ["Worldwide"],
                 "sources": ["linkedin"], "test_mode": True, "currency": "USD", "salary": "5000",
                 "salary_eur": "4500", "salary_usd": "5000"}
 
@@ -275,6 +276,7 @@ class ProfileBoundaryTests(SafetyTest):
 
     def test_valid_cache_preserves_hidden_validated_fields(self):
         apply.SETTINGS["cv_profile"] = profile()
+        apply.SETTINGS['cv_hash'] = hashlib.sha256(self.resume.read_bytes()).hexdigest()
         with patch.object(apply, "finalize_settings"):
             gui.start(self.body())
         self.assertEqual(apply.SETTINGS["cv_profile"]["skills"], profile()["skills"])
@@ -310,7 +312,7 @@ class ProfileBoundaryTests(SafetyTest):
         self.assertEqual(apply.SETTINGS["cv_profile"]["skills"], [])
 
     def test_analyze_does_not_persist_invalid_extractor_output(self):
-        apply.SETTINGS.update(cv_profile=profile(), cv_hash="previous")
+        apply.SETTINGS.update(cv_profile=profile(), cv_hash=hashlib.sha256(self.resume.read_bytes()).hexdigest())
         before = copy.deepcopy(apply.SETTINGS)
         with patch.object(cv_profile, "extract", return_value={**profile(), "job_titles": "Engineer"}):
             result = gui.analyze({"key": ""})
@@ -321,7 +323,8 @@ class ProfileBoundaryTests(SafetyTest):
 
     def test_valid_analyzed_profile_is_cached_with_matching_resume_hash(self):
         with patch.object(cv_profile, "extract", return_value=profile()):
-            self.assertEqual(gui.analyze({"key": ""}), {"ok": True, "profile": profile()})
+            self.assertEqual(gui.analyze({"key": ""}), {"ok": True, "profile": profile(),
+                "cv_hash": hashlib.sha256(self.resume.read_bytes()).hexdigest(), "cv_name": self.resume.name})
         self.assertEqual(apply.SETTINGS["cv_hash"], hashlib.sha256(self.resume.read_bytes()).hexdigest())
         self.assertFalse(gui.STATE["analyzing"])
 

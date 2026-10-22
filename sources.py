@@ -213,7 +213,7 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
         core.screenshot(page, f"{job['id'].replace(':', '_')}_noform")
         return "skipped_no_form"
     unanswered = core.fill_step(page, form, external=True)
-    if core.require_manual_review(page, form, unanswered, job["id"], job["title"], job["company"], job["url"]):
+    if core.require_manual_review(page, form, unanswered, job["id"], job["title"], job["company"], job["url"], external=True):
         return "manual_review"
     send = form.get_by_role("button", name=re.compile(r"send application|submit|^apply", re.I)).last
     if not send.count():
@@ -222,7 +222,7 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
     if core.DRY_RUN:
         core.screenshot(page, f"{job['id'].replace(':', '_')}_dryrun")
         page.keyboard.press("Escape")
-        return "dry_run"
+        return core.preview_application(job["id"])
     before = core.application_submission_signals(page)
     expected_host = urlparse(page.url).hostname
     return core.submit_application(page, send, job["id"], job["title"], job["company"], job["url"],
@@ -282,7 +282,7 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
             return "blocked"
         scope = ap.locator("main").first if ap.locator("main").count() else ap.locator("body")
         unanswered = core.fill_step(ap, scope, external=True)
-        if core.require_manual_review(ap, scope, unanswered, job["id"], job["title"], job["company"], job["url"]):
+        if core.require_manual_review(ap, scope, unanswered, job["id"], job["title"], job["company"], job["url"], external=True):
             return "manual_review"
         primary = ap.get_by_role("button", name=re.compile(
             r"^(next|continue|review|submit|send(?: your)? application|devam|[iİıI]leri|başvurunu gönder|gönder)", re.I)).last
@@ -293,7 +293,7 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
         if action == "submit":
             if core.DRY_RUN:
                 core.screenshot(ap, f"{job['id'].replace(':', '_')}_dryrun")
-                return "dry_run"
+                return core.preview_application(job["id"])
             before = core.application_submission_signals(ap)
             expected_host = urlparse(ap.url).hostname
             return core.submit_application(ap, primary, job["id"], job["title"], job["company"], job["url"],
@@ -357,16 +357,18 @@ def run(apply_module, page, applied: dict, count: int) -> int:
     for name, source in SOURCES.items():
         if not core.CFG["sources"].get(name):
             continue
-        if count >= limits["max_applications_per_run"] or time.time() > core.DEADLINE:
+        if count >= limits["max_applications_per_run"] or core.submission_quota_status() or time.time() > core.DEADLINE:
             break
+        if core.submission_quota_status(name):
+            continue
         core.log(f"=== {name} ===")
         done = 0
         try:
             for job, apply in source(page):
-                if count >= limits["max_applications_per_run"] or time.time() > core.DEADLINE:
+                if count >= limits["max_applications_per_run"] or core.submission_quota_status() or time.time() > core.DEADLINE:
                     core.log("Günlük limit/süre doldu.")
                     return count
-                if done >= limits.get("per_source", 15):
+                if done >= limits.get("per_source", 15) or core.submission_quota_status(name):
                     break
                 prev = applied.get(job["id"])
                 if prev and not core.can_retry(prev["status"]):
@@ -389,7 +391,8 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     continue
                 core.log(f"> {job['title']} @ {job['company']} ({name})")
                 try:
-                    status = apply(applied)
+                    with core.submission_source(name):
+                        status = apply(applied)
                 except Exception as e:
                     if core.browser_closed(e):
                         raise core.BrowserClosed() from None

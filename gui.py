@@ -62,19 +62,39 @@ def open_folder(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def resume_hash(path: Path | None = None) -> str:
+    if path is None:
+        if not apply.SETTINGS.get('resume'):
+            raise FileNotFoundError('No CV selected')
+        path = Path(apply.SETTINGS['resume'])
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def clear_cv_profile() -> None:
+    apply.SETTINGS.pop('cv_profile', None)
+    apply.SETTINGS.pop('cv_hash', None)
+
+
 def state() -> dict:
     s = apply.SETTINGS
+    try:
+        digest = resume_hash()
+    except OSError:
+        digest = ''
     prof, profile_error = s.get("cv_profile"), ""
     if prof is not None:
         try:
             cv_profile.validate(prof)
         except cv_profile.ProfileValidationError as e:
             prof, profile_error = None, str(e)
+        if prof is not None and (not digest or s.get('cv_hash') != digest):
+            prof, profile_error = None, 'profile: CV changed or cannot be verified; read it again or enter a new profile'
     return {
         "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode")},
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
         "profile": prof,
         "profile_error": profile_error,
+        "cv_hash": digest,
         "has_key": bool(apply.find_key()),
         "english_levels": {k: v[0] for k, v in apply.ENGLISH_LEVELS.items()},
         "default_locations": apply.CFG["search"]["locations"],
@@ -100,9 +120,19 @@ def _save_cv(body: dict) -> dict:
     folder = apply.HOME / "cv"
     folder.mkdir(exist_ok=True)
     path = folder / name
-    path.write_bytes(base64.b64decode(body["data"]))
+    data = base64.b64decode(body['data'], validate=True)
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        previous = resume_hash()
+    except OSError:
+        previous = ''
+    reset = previous != digest or (apply.SETTINGS.get('cv_profile') is not None
+                                  and apply.SETTINGS.get('cv_hash') != digest)
+    path.write_bytes(data)
     apply.SETTINGS["resume"] = str(path)
-    return {"ok": True, "cv_name": name}
+    if reset:
+        clear_cv_profile()
+    return {"ok": True, "cv_name": name, "cv_hash": digest, "profile_reset": reset}
 
 
 def analyze(body: dict) -> dict:
@@ -135,14 +165,28 @@ def _analyze(body: dict) -> dict:
     resume = Path(apply.SETTINGS.get("resume") or "missing")
     if not resume.is_file():
         return {"error": "no_cv"}
+    digest = None
     try:
+        digest = resume_hash(resume)
+        if apply.SETTINGS.get('cv_hash') != digest:
+            clear_cv_profile()
         prof = cv_profile.extract(resume, key, log=apply.log)
         cv_profile.validate(prof)
+        if resume_hash(resume) != digest:
+            clear_cv_profile()
+            return {'error': 'cv_changed'}
     except Exception as e:
+        try:
+            current_hash = resume_hash(resume)
+        except OSError:
+            current_hash = None
+        if not digest or current_hash != digest:
+            clear_cv_profile()
+            return {'error': 'cv_changed'}
         return {"error": "analyze_failed", "detail": f"{e.__class__.__name__}: {str(e)[:200]}"}
     apply.SETTINGS["cv_profile"] = prof
-    apply.SETTINGS["cv_hash"] = hashlib.sha256(resume.read_bytes()).hexdigest()
-    return {"ok": True, "profile": prof}
+    apply.SETTINGS["cv_hash"] = digest
+    return {"ok": True, "profile": prof, "cv_hash": digest, "cv_name": resume.name}
 
 
 def start(body: dict) -> dict:
@@ -156,9 +200,12 @@ def start(body: dict) -> dict:
         result = _prepare_start(body)
         if "error" in result:
             return result
+        accepted_resume, accepted_hash = Path(apply.SETTINGS['resume']), apply.SETTINGS['cv_hash']
 
         def worker():
             try:
+                if not apply.STOP.is_set() and resume_hash(accepted_resume) != accepted_hash:
+                    raise RuntimeError('CV changed before the worker started; review the new CV first')
                 apply.run_bot(reset_stop=False)  # Preserve Stop received while this worker was queued.
             except BaseException as e:  # The reservation must also survive STOP/browser closure.
                 apply.log(f"HATA: {e}")
@@ -197,7 +244,10 @@ def _prepare_start(body: dict) -> dict:
         return {"error": "no_cv"}
     if not isinstance(body, dict) or not isinstance(body.get("profile"), dict):
         return {"error": "invalid_profile", "detail": "profile: expected object"}
-    cached = s.get("cv_profile")
+    digest = resume_hash()
+    if body.get('cv_hash') != digest:
+        return {'error': 'cv_changed'}
+    cached = s.get('cv_profile') if s.get('cv_hash') == digest else None
     prof = {**cv_profile.empty_profile(), **(cached if cv_profile.valid(cached) else {}), **body["profile"]}
     # The HTML experience input is text; only this transport field is normalized.
     years = prof["total_years"]
@@ -241,10 +291,12 @@ def _prepare_start(body: dict) -> dict:
             return {"error": "invalid_settings", "detail": "settings.salary: conflicting amounts for the same currency"}
         monthly[c] = text
     # Clearing all fields must clear the old expectation, not silently reuse it.
+    if resume_hash() != digest:
+        return {'error': 'cv_changed'}
     base = next((c for c in ("USD", "EUR", cur) if c in monthly), cur)
     s.update(monthly_salary_by_currency=monthly, home_currency=cur, currency=base,
              salary=apply.decimal_text(apply.positive_decimal(monthly[base]) * 12) if monthly else "")
-    s.update(cv_profile=prof,
+    s.update(cv_profile=prof, cv_hash=digest,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
              locations=body["locations"] or apply.CFG["search"]["locations"],
               sources=body["sources"], test_mode=body["test_mode"])
@@ -421,7 +473,8 @@ const T = {
   test_on:"Test mode is ON: this is only a test run. Forms are filled in but NO application is sent. Untick the box to really apply.",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
-  err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.",
+   cv_replaced:"CV contents changed. Read it again or enter and check a new profile.", err_cv_changed:"The CV changed. Review the current file and enter or read your profile again.",
+   err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.",
   err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
   change_key:"Change key", quit:"Quit", quit_done:"The app is closed. You can close this tab.",
   levels:{1:"Native / bilingual", 2:"Fluent / professional", 3:"Conversational / intermediate", 4:"Basic"},
@@ -443,7 +496,8 @@ const T = {
   test_on:"Test modu AÇIK: bu sadece bir deneme. Formlar doldurulur ama HİÇBİR başvuru gönderilmez. Gerçekten başvurmak için işareti kaldır.",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
-  err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.",
+   cv_replaced:"CV içeriği değişti. Yeniden oku veya yeni profilini doldurup kontrol et.", err_cv_changed:"CV değişti. Güncel dosyayı kontrol edip profilini yeniden doldur veya oku.",
+   err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.",
   err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
   change_key:"Anahtarı değiştir", quit:"Kapat", quit_done:"Uygulama kapandı. Bu sekmeyi kapatabilirsin.",
   levels:{1:"Ana dil / iki dilli", 2:"Akıcı / profesyonel", 3:"Orta / konuşma", 4:"Temel"},
@@ -477,11 +531,11 @@ async function api(path, body) {
 }
 function msg(id, text, cls) { const e = $(id); e.textContent = text; e.className = "msg " + (cls || ""); }
 function err(id, r) { msg(id, t("err_" + r.error) + (r.detail ? " (" + r.detail + ")" : ""), "err"); }
-function fill(p) {
+function fill(p, show = true) {
   p = p || {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) $(k).value = p[k] ?? "";
   $("job_titles").value = (p.job_titles || []).join("\n");
-  $("s2").classList.remove("hidden"); $("s3").classList.remove("hidden");
+  if (show) { $("s2").classList.remove("hidden"); $("s3").classList.remove("hidden"); }
 }
 async function load() {
   S = await api("/api/state");
@@ -496,7 +550,7 @@ async function load() {
   const on = st.sources || Object.keys(SOURCES);
   $("sources").innerHTML = Object.entries(SOURCES).map(([k, v]) => `<label><input type="checkbox" value="${k}" ${on.includes(k) ? "checked" : ""}> ${v}</label>`).join("");
   $("test_mode").checked = st.test_mode ?? false;
-  if (S.profile) fill(S.profile);
+  fill(S.profile, !!S.profile);
   if (S.profile_error) err("m1", { error: "invalid_profile", detail: S.profile_error });
   if (S.running) watch();
   render();
@@ -507,14 +561,23 @@ $("file").onchange = async () => {
   const data = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.readAsDataURL(f); });
   const r = await api("/api/cv", { name: f.name, data });
   if (r.error) return err("m1", r);
-  S.cv_name = r.cv_name; $("cvname").textContent = r.cv_name; $("drop").classList.add("has"); msg("m1", "");
+  S.cv_name = r.cv_name; S.cv_hash = r.cv_hash;
+  $("cvname").textContent = r.cv_name; $("drop").classList.add("has");
+  if (r.profile_reset) { S.profile = null; fill(null); msg("m1", t("cv_replaced")); }
+  else msg("m1", "");
 };
 $("analyze").onclick = async () => {
   if (!S.cv_name) return err("m1", { error: "no_cv" });
   $("analyze").disabled = true; msg("m1", t("analyzing"));
   const r = await api("/api/analyze", { key: $("key").value });
   $("analyze").disabled = false;
-  if (r.error) { err("m1", r); if (r.error === "analyze_failed") fill(null); return; }
+  if (r.error) {
+    if (r.error === "cv_changed") await load();
+    if (r.error === "analyze_failed" || r.error === "cv_changed") { S.profile = null; fill(null); }
+    err("m1", r); return;
+  }
+  S.profile = r.profile; S.cv_hash = r.cv_hash; S.cv_name = r.cv_name;
+  $("cvname").textContent = r.cv_name;
   $("keybox").classList.add("hidden"); $("changekey").classList.remove("hidden"); $("key").value = ""; msg("m1", t("analyzed"), "ok"); fill(r.profile); $("s2").scrollIntoView({ behavior: "smooth" });
 };
 $("changekey").onclick = () => { $("keybox").classList.remove("hidden"); $("changekey").classList.add("hidden"); $("key").focus(); };
@@ -524,11 +587,12 @@ $("start").onclick = async () => {
   const profile = {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
-  const body = { profile, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+  const body = { profile, cv_hash: S.cv_hash, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
     salary_eur: $("salary_eur").value, salary_usd: $("salary_usd").value, notice: $("notice").value, english: $("english").value,
     sources: [...document.querySelectorAll("#sources input:checked")].map(e => e.value), test_mode: $("test_mode").checked };
   document.querySelectorAll("input.missing").forEach(e => e.classList.remove("missing"));
   const r = await api("/api/start", body);
+  if (r.error === "cv_changed") { await load(); S.profile = null; fill(null); }
   if (r.error === "missing") { r.fields.forEach(f => $(f).classList.add("missing")); $(r.fields[0]).scrollIntoView({ behavior: "smooth", block: "center" }); }
   if (r.error) return err("m3", r);
   logFrom = 0; $("log").textContent = ""; watch();
