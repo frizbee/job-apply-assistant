@@ -28,6 +28,7 @@ import secrets
 import sys
 import threading
 import time
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -313,7 +314,13 @@ def rates() -> dict[str, float]:
         for url in ("https://api.frankfurter.dev/v1/latest?base=USD", "https://open.er-api.com/v6/latest/USD"):
             try:
                 with urllib.request.urlopen(url, timeout=15, context=SSL_CTX) as r:
-                    RATES.update(json.loads(r.read())["rates"], USD=1.0)
+                    payload = json.loads(r.read())
+                if payload.get('base', payload.get('base_code')) != 'USD' or not isinstance(payload.get('rates'), dict):
+                    continue
+                valid = {code: value for code, value in payload['rates'].items() if positive_decimal(value) is not None}
+                if positive_decimal(valid.get('USD', 1)) != Decimal(1):
+                    continue
+                RATES.update(valid, USD=1.0)
                 if "TRY" in RATES:
                     break
             except Exception:
@@ -322,33 +329,79 @@ def rates() -> dict[str, float]:
 
 
 def salary_answer(question: str) -> str:
-    """Yıllık beklentiyi sorudaki para birimine ve döneme (aylık/saatlik/bin) çevirir."""
+    """Convert only explicit, unambiguous units; unknown amounts/FX require review."""
     q = question.lower()
-    turkish = bool(re.search(r"maaş|ücret", q))
-    amount = float(SETTINGS.get("salary") or 0)
-    have = SETTINGS.get("currency", "USD")
-    # Dolar işareti CAD sorularında da geçer; önce özel kodlara bak
-    want = next((c for c in ("CAD", "TRY", "PLN", "CHF", "INR", "GBP", "EUR", "USD") if re.search(CURRENCY_RE[c], q)),
-                "TRY" if turkish else have)  # Türkçe soru, birim yok: TL
-    fixed = SETTINGS.get("monthly_salary_by_currency") or {}  # ör. {"EUR": 2200, "TRY": 80000}: kurla çevirmek yerine bu
-    if want in fixed:
-        amount = float(fixed[want]) * 12
-    elif want != have:
-        r = rates()
-        if have in r and want in r:
-            amount = amount / r[have] * r[want]
-    if re.search(r"hour|saatlik|stündlich|\brate\b", q):
-        amount, step = amount / 2080, 1
-    elif re.search(r"\bday\b|daily|günlük", q):
-        amount, step = amount / 220, 5
-    elif re.search(r"month|aylık|monat|mensuel", q) or ((want == "TRY" or turkish) and not re.search(r"year|annual|yıllık", q)):
-        # Türkiye'de dönem yazmayan maaş sorusu aylık demektir
-        amount, step = amount / 12, 100
-    else:
-        step = 1000
-    if re.search(r"in thousands|\(k\)|thousands of|bin (tl|usd|eur)", q):
-        amount, step = amount / 1000, 1
-    return str(int(max(step, round(amount / step) * step)))
+    # Strip recognized names first so CAD dollars do not also become USD.
+    remaining, currencies = q, set()
+    patterns = {**CURRENCY_RE, 'USD': r'\busd\b|\bus dollars?\b',
+                'CAD': r'\bcad\b|\bcanadian dollars?\b'}
+    for code, pattern in patterns.items():
+        if re.search(pattern, remaining):
+            currencies.add(code)
+            remaining = re.sub(pattern, ' ', remaining)
+    # A bare $/dollar is not USD: many currencies share it. Unknown currency
+    # names/codes must not be hidden by a recognized code elsewhere in the label.
+    if re.search(r'\b(?:aud|nzd|sgd|hkd|jpy|cny|rmb|rub|brl|mxn|zar|sek|nok|dkk|aed|sar|krw|ils|pkr|bdt|ron|czk|huf|uah|idr|myr|thb|php|vnd)\b|[¥₩₽]|yen|yuan|rou?bles?|pesos?|australian|singapore|hong kong|new zealand', remaining):
+        return ''
+    if any(code not in {'per', 'net', 'the'} for code in re.findall(r'\b(?:in|currency|or)\s+([a-z]{3})\b', remaining)):
+        return ''
+    if len(currencies) != 1 or (re.search(r'\bdollars?\b|\$', remaining) and not currencies <= {'USD', 'CAD'}):
+        return ''
+    want = currencies.pop()
+    periods = {name for name, pattern in {
+        'annual': r'\bannual(?:ly)?\b|\byearly\b|(?:\bper\s+|/\s*)(?:year|annum)\b|yıllık',
+        'monthly': r'\bmonthly\b|(?:\bper\s+|/\s*)month\b|aylık|monat|mensuel',
+        'hourly': r'\bhourly\b|(?:\bper\s+|/\s*)(?:hour|hr)\b|saatlik|stündlich',
+        'daily': r'\bdaily\b|(?:\bper\s+|/\s*)day\b|günlük',
+    }.items() if re.search(pattern, q)}
+    if len(periods) != 1 or re.search(r'\bweek|\bbiweekly\b|\bfortnight|\bquarter|\bsemi[ -]?|\bbiannual|\bbimonth|\bper (?:minute|second)|haftalık', q):
+        return ''
+    fixed = SETTINGS.get('monthly_salary_by_currency') or {}
+    if not isinstance(fixed, dict):
+        return ''
+    amount = positive_decimal(fixed[want] if want in fixed else SETTINGS.get('salary'))
+    if amount is None:
+        return ''
+    try:
+        with localcontext() as context:
+            context.prec = 40
+            if want in fixed:
+                amount *= 12
+            else:
+                have = SETTINGS.get('currency')
+                if have not in CURRENCY_RE:
+                    return ''
+                if have != want:
+                    fx = rates()
+                    if not isinstance(fx, dict):
+                        return ''
+                    source, target = positive_decimal(fx.get(have)), positive_decimal(fx.get(want))
+                    if source is None or target is None:
+                        return ''
+                    amount = amount / source * target
+            amount /= {'annual': 1, 'monthly': 12, 'hourly': 2080, 'daily': 220}[periods.pop()]
+            if re.search(r'in thousands|\(k\)|thousands of|bin (tl|usd|eur)', q):
+                amount /= 1000
+            rounded = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return decimal_text(rounded) if rounded > 0 else ''
+    except (InvalidOperation, OverflowError, ValueError, TypeError, ArithmeticError):
+        return ''
+
+
+def positive_decimal(value) -> Decimal | None:
+    """Reject booleans, nonfinite numbers and malformed/ambiguous numeric text."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    text = str(value).strip()
+    if not re.fullmatch(r'\d+(?:\.\d+)?', text) or len(text) > 24:
+        return None
+    number = Decimal(text)
+    return number if number.is_finite() and number > 0 else None
+
+
+def decimal_text(value: Decimal) -> str:
+    text = format(value, 'f')
+    return text.rstrip('0').rstrip('.') if '.' in text else text
 
 
 def placeholder(a: str) -> str:

@@ -226,15 +226,24 @@ def _prepare_start(body: dict) -> dict:
     if not isinstance(locations, list) or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
     # Aylık beklentiler: kendi para birimi + EUR + USD. Yıllık "salary" diğer para birimlerine çevirmenin tabanı.
-    cur = body.get("currency") if body.get("currency") in apply.CURRENCY_RE else "USD"
+    cur = body.get("currency")
+    if not isinstance(cur, str) or cur not in apply.CURRENCY_RE:
+        return {"error": "invalid_settings", "detail": "settings.currency: unknown currency"}
     monthly = {}
     for c, v in ((cur, body.get("salary")), ("EUR", body.get("salary_eur")), ("USD", body.get("salary_usd"))):
-        if v := re.sub(r"\D", "", str(v or "")):
-            monthly[c] = int(v)
-    if monthly:
-        s.update(monthly_salary_by_currency=monthly, home_currency=cur)
-        base = next(c for c in ("USD", "EUR", cur) if c in monthly)
-        s.update(currency=base, salary=str(monthly[base] * 12))
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        number = apply.positive_decimal(v)
+        if number is None:
+            return {"error": "invalid_settings", "detail": "settings.salary: expected a positive amount with a decimal point (or blank)"}
+        text = apply.decimal_text(number)
+        if c in monthly and monthly[c] != text:
+            return {"error": "invalid_settings", "detail": "settings.salary: conflicting amounts for the same currency"}
+        monthly[c] = text
+    # Clearing all fields must clear the old expectation, not silently reuse it.
+    base = next((c for c in ("USD", "EUR", cur) if c in monthly), cur)
+    s.update(monthly_salary_by_currency=monthly, home_currency=cur, currency=base,
+             salary=apply.decimal_text(apply.positive_decimal(monthly[base]) * 12) if monthly else "")
     s.update(cv_profile=prof,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
              locations=body["locations"] or apply.CFG["search"]["locations"],
@@ -405,7 +414,7 @@ const T = {
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
   titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
-  salary_hint:"Net amounts per month. A form asking in one of these currencies gets that number (x12 if it asks per year). Other currencies and hourly rates are converted automatically.",
+   salary_hint:"Monthly amounts; use a decimal point, no grouping separators. Leave blank if unknown. Automatic answers require an explicit currency and period, and valid exchange rates when converting. Hourly/daily conversions use 2080 hours/220 days per year. Otherwise manual review is required.",
   step3:"Step 3", where_title:"Where to apply", where_hint:"Only remote jobs posted in the last 7 days. Company websites are limited to a few per run so you are not flagged as spam.",
   test_mode:"Test mode (fill in forms but do NOT send them)",
   test_off:"Test mode is OFF: real applications will be sent. Tick the box if you only want to try the app first.",
@@ -427,7 +436,7 @@ const T = {
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
   titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
-  salary_hint:"Aylık tutarlar. Form bu para birimlerinden biriyle sorarsa o tutar yazılır (yıllık sorarsa x12). Diğer para birimleri ve saatlik ücret otomatik çevrilir.",
+   salary_hint:"Aylık tutarlar; ondalık nokta kullan, binlik ayırıcı kullanma. Bilinmiyorsa boş bırak. Otomatik yanıt için açık para birimi/dönem ve dönüşümde geçerli kur gerekir. Saatlik/günlük dönüşüm yılda 2080 saat/220 gün kullanır. Aksi durumda manuel kontrol gerekir.",
   step3:"Adım 3", where_title:"Nereye başvurulsun", where_hint:"Sadece son 7 günde yayınlanan remote ilanlar. Şirket sitelerine her çalıştırmada az sayıda başvurulur, spam sayılmamak için.",
   test_mode:"Test modu (formları doldurur ama GÖNDERMEZ)",
   test_off:"Test modu KAPALI: gerçek başvurular gönderilir. Önce sadece denemek istersen kutuyu işaretle.",

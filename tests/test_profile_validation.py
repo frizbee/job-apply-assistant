@@ -244,6 +244,35 @@ class ProfileBoundaryTests(SafetyTest):
         finalize.assert_called_once()
         self.thread.return_value.start.assert_called_once()
 
+    def test_gui_salary_rejects_invalid_values_without_changing_settings(self):
+        before = copy.deepcopy(apply.SETTINGS)
+        for field, value in [('currency', 'XYZ'), ('salary', '-5000'), ('salary', '5,000'),
+                             ('salary', '0'), ('salary', 'NaN'), ('salary', True),
+                             ('salary_usd', '5001')]:
+            body = self.body()
+            body[field] = value
+            self.assertEqual(gui.start(body)['error'], 'invalid_settings', (field, value))
+            self.assertEqual(apply.SETTINGS, before)
+        self.thread.assert_not_called()
+
+    def test_gui_cleared_salary_does_not_reuse_old_amounts(self):
+        apply.SETTINGS['monthly_salary_by_currency'] = {'USD': 5000}
+        body = self.body()
+        body.update(salary='', salary_usd='', salary_eur='')
+        with patch.object(apply, 'finalize_settings'):
+            self.assertEqual(gui.start(body), {'ok': True})
+        self.assertEqual(apply.SETTINGS['salary'], '')
+        self.assertEqual(apply.SETTINGS['monthly_salary_by_currency'], {})
+        self.assertEqual(apply.salary_answer('Annual salary in USD'), '')
+
+    def test_gui_decimal_salary_is_preserved_not_digit_stripped(self):
+        body = self.body()
+        body.update(salary='5000.25', salary_usd='5000.25', salary_eur='')
+        with patch.object(apply, 'finalize_settings'):
+            self.assertEqual(gui.start(body), {'ok': True})
+        self.assertEqual(apply.SETTINGS['salary'], '60003')
+        self.assertEqual(apply.salary_answer('Monthly salary in USD'), '5000.25')
+
     def test_valid_cache_preserves_hidden_validated_fields(self):
         apply.SETTINGS["cv_profile"] = profile()
         with patch.object(apply, "finalize_settings"):
