@@ -65,6 +65,8 @@ def page_ready(page) -> bool:
 def goto(page, url: str, what: str) -> bool:
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     core.pause(2, 4)
+    if what.casefold() == 'indeed':
+        return indeed_wait_ready(page, 'search' if urlparse(url).path.rstrip('/') == '/jobs' else 'detail')
     return core.wait_human(page, page_ready, f"complete the {what} security verification")
 
 
@@ -390,6 +392,71 @@ def wellfound(page):
 
 # ---------------------------------------------------------------- Indeed
 
+INDEED_AUTH_PATH = re.compile(r'/(?:auth|account|accounts|login|signin|sign-in|registration)(?:/|$)', re.I)
+INDEED_AUTH_HEADING = re.compile(r'^\s*(?:sign\s*in|log\s*in|create (?:an? |your )?account|welcome back|verify (?:your )?email|enter (?:your )?(?:email|password|code)|two.step verification)\b', re.I)
+
+
+def indeed_host(page) -> bool:
+    host = (urlparse(page.url).hostname or '').lower()
+    configured = core.CFG['sources'].get('indeed_domain', 'www.indeed.com').lower().removeprefix('www.')
+    return bool(host) and (host == configured or host.endswith('.' + configured)
+                           or host == 'indeed.com' or host.endswith('.indeed.com'))
+
+
+def indeed_auth_pending(page) -> bool:
+    parsed = urlparse(page.url)
+    host = (parsed.hostname or '').lower()
+    if host in ('accounts.indeed.com', 'account.indeed.com', 'auth.indeed.com') or INDEED_AUTH_PATH.search(parsed.path):
+        return True
+    if page.locator('input[type="password"]:visible, input[autocomplete="username"]:visible, form[action*="/login"]:visible').count():
+        return True
+    return bool(page.get_by_role('heading', name=INDEED_AUTH_HEADING).count())
+
+
+def indeed_ready_evidence(page, stage: str) -> bool:
+    """Positive page evidence, not just the temporary absence of a challenge."""
+    try:
+        if not indeed_host(page) or core.blocked(page) or indeed_auth_pending(page):
+            return False
+        if stage == 'search':
+            return bool(page.locator('[data-jk]:visible, .jobsearch-NoResult-messageContainer:visible, [data-testid="no-results"]:visible, #no_results:visible').count())
+        if stage == 'detail':
+            return bool(page.locator('#jobDescriptionText:visible, [data-testid="jobsearch-JobInfoHeader-title"]:visible, .jobsearch-JobInfoHeader-title:visible, #indeedApplyButton:visible').count())
+        if stage == 'application':
+            return bool(page.get_by_role('button', name=core.NAVIGATION_BUTTON_RE).count()
+                        or page.get_by_role('button', name=core.FINAL_BUTTON_RE).count())
+        return False
+    except Exception as e:
+        if core.browser_closed(e):
+            raise core.BrowserClosed() from None
+        # Redirects may briefly destroy the document. They are never readiness.
+        return False
+
+
+def indeed_wait_ready(page, stage: str) -> bool:
+    """Wait passively through login/MFA/challenge; never reload or navigate here."""
+    state = {'url': None, 'since': None}
+    def stable(p):
+        if core.STOP.is_set():
+            raise core.Stopped
+        if not indeed_ready_evidence(p, stage):
+            state.update(url=None, since=None)
+            return False
+        now = time.monotonic()
+        if state['url'] != p.url or state['since'] is None:
+            state.update(url=p.url, since=now)
+            return False
+        return now - state['since'] >= 1
+    # Avoid asking an already-ready user to sign in just for the stability check.
+    if indeed_ready_evidence(page, stage):
+        stable(page)
+        page.wait_for_timeout(1100)
+        if stable(page):
+            return True
+    return core.wait_human(page, stable,
+                           'finish Indeed sign-in or security verification (the app will not reload the page)', minutes=10)
+
+
 def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
     if not goto(page, job["url"], "Indeed"):
         return "blocked"
@@ -408,12 +475,7 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
     ap = ctx.pages[-1] if len(ctx.pages) > before else page
     for _ in range(15):
         core.pause(1.5, 3)
-        if re.search(r"secure\.indeed\.com/(auth|account)", ap.url):
-            if not core.wait_human(ap, lambda p: not re.search(r"secure\.indeed\.com/(auth|account)", p.url),
-                                   "sign in to Indeed", minutes=10):
-                return "blocked"
-            continue
-        if not core.wait_human(ap, page_ready, "complete the Indeed security verification"):
+        if not indeed_wait_ready(ap, 'application'):
             return "blocked"
         scope = ap.locator("main").first if ap.locator("main").count() else ap.locator("body")
         unanswered = core.fill_step(ap, scope, external=True)

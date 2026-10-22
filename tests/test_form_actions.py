@@ -185,7 +185,8 @@ class BrowserFormActionTests(SafetyTest):
     def test_indeed_rejects_ambiguous_and_submit_capable_navigation(self):
         job = {"id": "indeed:fixture", "title": "Engineer", "company": "Example", "url": "https://www.indeed.com/viewjob?jk=fixture"}
         for text in ["Continue and submit", "Next"]:
-            with self.subTest(text=text), patch.object(sources, "core", apply), patch.object(sources, "goto", return_value=True):
+            with self.subTest(text=text), patch.object(sources, "core", apply), patch.object(sources, "goto", return_value=True), \
+                    patch.object(sources, 'indeed_wait_ready', return_value=True):
                 self.form('<button id="indeedApplyButton" type="button">Easy Apply</button>'
                           f'<main><button type="submit">{text}</button></main>')
                 self.assertEqual(sources.indeed_apply(self.page, job), "manual_review")
