@@ -140,6 +140,7 @@ class SubmitterTests(HistoryTestBase):
 
     def board_submit(self, board, outcome):
         page, form, send = node(), node(), node()
+        page.evaluate.return_value = True  # Current-job opener association verified.
         page.url = f"https://{board}.com/jobs/123"
         page.context.pages = [page]
         page.locator.return_value = form

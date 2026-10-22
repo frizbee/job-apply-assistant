@@ -59,9 +59,11 @@ async function main() {
   const before = read("lang");
   const switched = [];
   const technologyValues = {target: elements.get('target_technologies').value, excluded: elements.get('excluded_technologies').value};
+  const titleExclusions = elements.get('excluded_title_words').value;
   if (input.scenario === 'technology-start') {
     elements.get('target_technologies').value = input.targetText ?? technologyValues.target;
     elements.get('excluded_technologies').value = input.excludedText ?? technologyValues.excluded;
+    elements.get('excluded_title_words').value = input.excludedTitleText ?? titleExclusions;
     await elements.get('start').click();
   }
   if (input.scenario === "switch" || input.scenario === "blocked-switch") {
@@ -88,7 +90,7 @@ async function main() {
       await pending;
     }
   }
-  process.stdout.write(JSON.stringify({ before, lang: read("lang"), stored, requests, switched, technologyValues,
+  process.stdout.write(JSON.stringify({ before, lang: read("lang"), stored, requests, switched, technologyValues, titleExclusions,
     quitText: quit.textContent, quitActive: quit.classList.contains("on"), body: body.innerHTML,
     timers: timers.size, english: elements.get("english").value, message: elements.get("m1").textContent }));
 }

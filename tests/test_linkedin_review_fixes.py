@@ -357,7 +357,7 @@ class BrowserLinkedinLayoutTests(SafetyTest):
         self.enterContext(patch.object(apply, 'load_applied', return_value={}))
         self.enterContext(patch.object(sources, 'goto', side_effect=lambda page, url, name: (page.goto(url), True)[1]))
         url = 'https://wellfound.com/jobs/123-engineer'
-        self.html = '<title>Engineer at Example • Remote</title><a href="/jobs/123-engineer">Job</a>'
+        self.html = '<title>Engineer at Example • Remote</title><div class="select__control"><span class="select__single-value">Engineer</span><input id="react-select-1-input"></div><a href="/jobs/123-engineer">Job</a>'
         self.html += '<aside>Recommendations: Python is required.</aside><script type="application/ld+json">' + json.dumps({
             '@type': 'JobPosting', 'url': url, 'title': 'Engineer', 'description': 'Ruby backend.',
             'datePosted': '2026-10-20', 'jobLocationType': 'TELECOMMUTE'}) + '</script>'
@@ -371,7 +371,7 @@ class BrowserLinkedinLayoutTests(SafetyTest):
         self.enterContext(patch.object(sources, 'core', apply))
         self.enterContext(patch.object(apply, 'load_applied', return_value={}))
         self.enterContext(patch.object(sources, 'goto', side_effect=lambda page, url, name: (page.goto(url), True)[1]))
-        self.html = '<title>Engineer at Example • Remote</title><a href="/jobs/123-engineer">Job</a><aside>Ruby backend; Python is required.</aside>'
+        self.html = '<title>Engineer at Example • Remote</title><div class="select__control"><span class="select__single-value">Engineer</span><input id="react-select-1-input"></div><a href="/jobs/123-engineer">Job</a><aside>Ruby backend; Python is required.</aside>'
         apply.CFG['search']['keywords'] = ['Engineer']
         job, _ = next(sources.wellfound(self.page))
         self.assertEqual(job['desc'], '')

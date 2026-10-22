@@ -186,13 +186,37 @@ def wellfound_login(page) -> bool:
     return LOGGED_IN["wellfound"]
 
 
+WELLFOUND_OPENER_JS = r"""job => {
+    document.querySelectorAll('[data-autoapply-wellfound-opener]').forEach(e => e.removeAttribute('data-autoapply-wellfound-opener'));
+    if (location.origin + location.pathname.replace(/\/$/, '') !== job.url.replace(/\/$/, '')) return false;
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+    const headings = [...document.querySelectorAll('h1')].filter(e => visible(e) && clean(e.innerText) === clean(job.title));
+    if (headings.length !== 1) return false;
+    for (let root = headings[0].parentElement, depth = 0; root && depth < 6; root = root.parentElement, depth++) {
+        if (root.matches('body, html') || root.querySelectorAll('h1').length !== 1) break;
+        const otherJob = [...root.querySelectorAll('a[href*="/jobs/"]')].some(e => {
+            const u = new URL(e.href, location.href);
+            return /\/jobs\/\d+/.test(u.pathname) && u.origin + u.pathname.replace(/\/$/, '') !== job.url.replace(/\/$/, '');
+        });
+        if (otherJob) break;
+        const buttons = [...root.querySelectorAll('button')].filter(e => visible(e) && /^apply( now)?$/i.test(clean(e.innerText))
+            && (!e.getAttribute('aria-label') || /^apply( now)?$/i.test(clean(e.getAttribute('aria-label')))));
+        if (buttons.length === 1) { buttons[0].setAttribute('data-autoapply-wellfound-opener', 'true'); return true; }
+        if (buttons.length > 1) return false;
+    }
+    return false;
+}"""
+
+
 def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
     if not wellfound_login(page) or not goto(page, job["url"], "Wellfound"):
         return "blocked"
     ctx, before, start = page.context, len(page.context.pages), page.url
-    btn = page.get_by_role("button", name=re.compile(r"^\s*apply( now)?\s*$", re.I)).first
-    if not btn.count():
-        return "already_applied_or_closed"
+    if page.evaluate(WELLFOUND_OPENER_JS, {'url': job['url'], 'title': job['title']}) is not True:
+        core.record_manual(job['id'], job['title'], job['company'], job['url'], 'Cannot uniquely associate Apply with the current job')
+        return 'manual_review'
+    btn = page.locator('[data-autoapply-wellfound-opener="true"]')
     try:
         core.click_form_control(btn)
     except core.UnsafeFormControl:
@@ -208,17 +232,27 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
         else:
             page.goto(start, wait_until="domcontentloaded")
         return external(page, job, url, "wellfound.com", applied)
-    form = page.locator(f"{core.MODAL}, form:has(textarea)").first
-    if not form.count():
-        core.screenshot(page, f"{job['id'].replace(':', '_')}_noform")
-        return "skipped_no_form"
+    forms = page.locator("dialog[open]:visible, div[role='dialog']:visible")
+    if not forms.count():
+        forms = page.locator('form:has(textarea):visible')
+    if forms.count() != 1:
+        core.record_manual(job['id'], job['title'], job['company'], job['url'], 'Application form missing or ambiguous after Apply')
+        return 'manual_review'
+    form = forms.first
     unanswered = core.fill_step(page, form, external=True)
     if core.require_manual_review(page, form, unanswered, job["id"], job["title"], job["company"], job["url"], external=True):
         return "manual_review"
-    send = form.get_by_role("button", name=re.compile(r"send application|submit|^apply", re.I)).last
-    if not send.count():
+    sends = form.get_by_role("button", name=re.compile(r"send application|submit|^apply", re.I))
+    if not sends.count():
         core.screenshot(page, f"{job['id'].replace(':', '_')}_unanswered")
         return "skipped_unanswered"
+    if sends.count() != 1:
+        core.record_manual(job['id'], job['title'], job['company'], job['url'], 'Ambiguous final application action')
+        return 'manual_review'
+    send = sends.first
+    if core.application_button_action(send) != 'submit':
+        core.record_manual(job['id'], job['title'], job['company'], job['url'], 'Unrecognized final application action')
+        return 'manual_review'
     if core.DRY_RUN:
         core.screenshot(page, f"{job['id'].replace(':', '_')}_dryrun")
         page.keyboard.press("Escape")
@@ -229,11 +263,41 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
         lambda: core.wait_application_submission(page, before, checks=15, expected_host=expected_host), applied)
 
 
+WELLFOUND_SEARCH_JS = r"""() => {
+    const input = document.querySelector('input[id^="react-select-"]');
+    const control = input?.closest('.select__control');
+    const value = control?.querySelector('.select__single-value');
+    return value && value.getClientRects().length ? value.innerText.trim() : '';
+}"""
+
+
+def wellfound_search_verified(page, requested_url: str, keyword: str) -> bool:
+    """Never treat a generic /remote redirect or an unselected role as a query."""
+    expected, actual = urlparse(requested_url), urlparse(page.url)
+    if (actual.scheme, actual.netloc, actual.path.rstrip('/')) != (expected.scheme, expected.netloc, expected.path.rstrip('/')):
+        return False
+    for attempt in range(3):
+        selected = page.evaluate(WELLFOUND_SEARCH_JS)
+        if isinstance(selected, str) and ' '.join(selected.split()).casefold() == ' '.join(keyword.split()).casefold():
+            return True
+        if attempt < 2:
+            page.wait_for_timeout(500)
+    return False
+
+
 def wellfound(page):
     seen = set()
     for kw in core.CFG["search"]["keywords"]:
-        if not goto(page, f"https://wellfound.com/role/r/{slug(kw)}", "Wellfound"):
+        search_url = f"https://wellfound.com/role/r/{slug(kw)}"
+        if not goto(page, search_url, "Wellfound"):
+            core.METRICS.mark('searches_failed', f'wellfound:{kw}')
             return
+        if not wellfound_search_verified(page, search_url, kw):
+            core.METRICS.mark('searches_failed', f'wellfound:{kw}')
+            core.log(f"  ! Wellfound search not applied for {kw!r}: requested {search_url}, actual {page.url.split('?')[0]}. "
+                     'The exact role was not confirmed; generic results will not be processed. Choose a supported role explicitly in the GUI; no replacement was made.')
+            continue
+        core.METRICS.mark('searches_verified', f'wellfound:{kw}')
         ids = dict.fromkeys(re.findall(r"/jobs/(\d+-[\w-]+)", page.content()))
         for jid in ids:
             if jid in seen:
@@ -242,6 +306,8 @@ def wellfound(page):
             url = f"https://wellfound.com/jobs/{jid}"
             prev = core.load_applied().get(f"wellfound:{jid}")
             if prev and not core.can_retry(prev["status"]) and prev['status'] not in core.job_rechecks.RECHECKABLE:
+                core.METRICS.mark('seen', f'wellfound:{jid}')
+                core.METRICS.mark('history_skipped', f'wellfound:{jid}')
                 continue
             if not goto(page, url, "Wellfound"):
                 return
@@ -379,6 +445,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     break
                 if not core.should_visit_job(applied, job['id']):
                     continue
+                core.METRICS.mark('evaluated', job['id'])
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
@@ -398,7 +465,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 core.log(f"> {job['title']} @ {job['company']} ({name})")
                 core.mark_evaluation_passed(applied, job['id'], job['title'], job['company'], job['url'])
                 try:
-                    with core.submission_source(name):
+                    with core.submission_source(name), core.METRICS.application(job['id']):
                         status = apply(applied)
                 except Exception as e:
                     if core.browser_closed(e):
@@ -410,6 +477,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     if status not in core.UNCERTAIN_STATUSES and status not in ("applied", "applied_external", "submission_rejected"):
                         status = "pre_submission_error"
                 core.log(f"  = {status}")
+                core.METRICS.outcome(job['id'], status)
                 if status != "dry_run" and applied.get(job["id"], {}).get("status") != status:
                     core.record(applied, job["id"], job["title"], job["company"], status, job["url"])
                 if status in ("applied", "applied_external", "dry_run"):

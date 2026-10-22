@@ -36,6 +36,9 @@ import llm_credentials
 import job_metadata
 import job_relevance
 import job_rechecks
+from run_metrics import RunMetrics
+
+METRICS = RunMetrics()
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -202,7 +205,10 @@ def release_submission_attempt(source: str) -> None:
 def preview_application(job_id: str) -> str:
     if STOP.is_set():
         raise Stopped
-    return reserve_submission_attempt(source_for_job(job_id)) or 'dry_run'
+    status = reserve_submission_attempt(source_for_job(job_id)) or 'dry_run'
+    if status == 'dry_run':
+        METRICS.mark('previews', job_id)
+    return status
 
 
 LOG_LINES: list[str] = []  # Read by the GUI log endpoint.
@@ -288,6 +294,7 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
                        'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
     applied[job_id].pop('metadata_diagnostic', None)
     applied[job_id].pop('technology_diagnostic', None)
+    applied[job_id].pop('title_diagnostic', None)
     decisions.append(job_rechecks.snapshot(applied[job_id]))
     applied[job_id]['decisions'] = decisions
     write_applied(applied)
@@ -1058,7 +1065,29 @@ def unconfirmed_text_questions(scope: Locator, *, external: bool) -> list[str]:
     return issues
 
 
+FORM_VALUES_JS = """root => [...root.querySelectorAll('input,select,textarea')].map(e =>
+    [e.tagName, e.type, e.name, e.value, e.checked, e.files ? [...e.files].map(f=>f.name) : null])"""
+
+
 def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
+    """Count actual form access/changed values without logging personal values."""
+    METRICS.mark('forms_opened')
+    try:
+        before = modal.evaluate(FORM_VALUES_JS)
+    except Exception:
+        before = None
+    result = _fill_step(page, modal, external)
+    if before is not None:
+        try:
+            after = modal.evaluate(FORM_VALUES_JS)
+            if after != before:
+                METRICS.mark('forms_changed')
+        except Exception:
+            pass  # Observability must not change filling or safety decisions.
+    return result
+
+
+def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     """Fill empty fields and verify answers; nonempty text is not confirmation."""
     unanswered: list[str] = []
     # Text fields.
@@ -1801,6 +1830,9 @@ def job_ok(title: str, company: str, description: str) -> str | None:
     t, d = title.lower(), description.lower()
     if not title.strip() or not company.strip():
         return 'identity_unknown'
+    job_relevance.validate_settings(SETTINGS)
+    if job_relevance.excluded_title_word(title, SETTINGS):
+        return 'title_keyword_excluded'
     if not any(re.search(p, t) for p in f["title_include"]):
         return "title_not_relevant"
     if not all(re.search(p, t) for p in f.get("title_require", [])):
@@ -1852,6 +1884,7 @@ def check_job_eligibility(job: dict, applied: dict) -> bool:
     if unknown:
         diagnostic = (job.get('metadata') or {}).get('diagnostic')
         record_manual(job["id"], job["title"], job["company"], job["url"], reason + (': ' + json.dumps(diagnostic, ensure_ascii=False) if diagnostic else ''))
+    METRICS.mark('manual' if unknown else 'rejected', job['id'])
     record(applied, job["id"], job["title"], job["company"], status, job["url"])
     if applied.get(job['id'], {}).get('decisions'):
         applied[job['id']]['reason'] = reason
@@ -1873,10 +1906,12 @@ def begin_job_rechecks(applied: dict) -> None:
 
 
 def should_visit_job(applied: dict, job_id: str) -> bool:
+    METRICS.mark('seen', job_id)
     previous = applied.get(job_id)
     if previous is None or can_retry(previous['status']):
         return True
     if not SETTINGS.get('recheck_enabled', CFG.get('rechecks', {}).get('enabled', False)):
+        METRICS.mark('history_skipped', job_id)
         return False
     options = CFG.get('rechecks', {})
     if job_rechecks.claim(previous, job_rechecks.revision(CFG, SETTINGS), RECHECK_STATE,
@@ -1884,16 +1919,22 @@ def should_visit_job(applied: dict, job_id: str) -> bool:
                           cooldown_hours=options.get('cooldown_hours', 24)):
         write_applied(applied)
         return True
+    METRICS.mark('history_skipped', job_id)
     return False
 
 
 def record_relevance_decision(applied: dict, job_id: str, title: str, company: str, reason: str, url: str, description: str = '') -> None:
+    METRICS.mark('manual' if reason in MANUAL_RELEVANCE else 'rejected', job_id)
     if reason in MANUAL_RELEVANCE:
         record_manual(job_id, title, company, url, reason)
     record(applied, job_id, title, company, 'relevance_manual' if reason in MANUAL_RELEVANCE else reason, url)
     if applied.get(job_id, {}).get('decisions'):
         applied[job_id]['reason'] = reason
         applied[job_id]['decisions'][-1]['reason'] = reason
+        if reason == 'title_keyword_excluded':
+            diagnostic = {'term': job_relevance.excluded_title_word(title, SETTINGS), 'evidence': title, 'source': 'title'}
+            applied[job_id]['title_diagnostic'] = diagnostic
+            applied[job_id]['decisions'][-1]['title_diagnostic'] = diagnostic
         if reason in ('excluded_technology', 'stack_unknown'):
             evidence = job_relevance.assess(title, description, **technology_filters())
             applied[job_id]['technology_diagnostic'] = evidence
@@ -2114,17 +2155,20 @@ def apply_cv_profile(prof: dict) -> None:
 def process_job(page: Page, applied: dict, job_id: str) -> bool:
     """Open and process an eligible job; return True for a confirmed success or preview."""
     try:
+        METRICS.mark('seen', job_id)
         previous = applied.get(job_id)
         if previous and not can_retry(previous['status']):
             authorized_recheck = (previous['status'] in job_rechecks.RECHECKABLE
                                  and previous.get('recheck', {}).get('run_id') == RECHECK_STATE['id'])
             if not authorized_recheck:
+                METRICS.mark('history_skipped', job_id)
                 return False
         if submission_quota_status('linkedin'):
             return False
         page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded")
         pause(2.5, 4.5)
         title, company, desc = job_info(page)
+        METRICS.mark('evaluated', job_id)
         reason = job_ok(title, company, desc) or ("applied_elsewhere" if applied_elsewhere(applied, title, company) else None)
         if reason:
             log(f"- skip [{reason}] {title} @ {company}")
@@ -2137,9 +2181,11 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             return False
         log(f"> {title} @ {company}")
         mark_evaluation_passed(applied, job_id, title, company, url)
-        status = apply_to_job(page, job_id, title, company, applied)
-        if status == "no_easy_apply" and EXTERNAL:
-            status = apply_external(page, job_id, title, company, applied)
+        with METRICS.application(job_id):
+            status = apply_to_job(page, job_id, title, company, applied)
+            if status == "no_easy_apply" and EXTERNAL:
+                status = apply_external(page, job_id, title, company, applied)
+        METRICS.outcome(job_id, status)
         log(f"  = {status}")
         if status != "dry_run" and applied.get(job_id, {}).get("status") != status:
             record(applied, job_id, title, company, status)
@@ -2151,6 +2197,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         if browser_closed(e):
             raise BrowserClosed() from None
         log(f"  ! error {job_id}: {e.__class__.__name__}: {str(e)[:150]}")
+        METRICS.mark('errors', job_id)
         screenshot(page, f"{job_id}_error")
         try:
             page.keyboard.press("Escape")
@@ -2224,6 +2271,7 @@ def launch(pw):
 def run_bot(*, reset_stop: bool = True) -> int:
     """Run the application workflow after SETTINGS have been prepared."""
     global DEADLINE
+    METRICS.reset()
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
@@ -2261,7 +2309,7 @@ def run_bot(*, reset_stop: bool = True) -> int:
             except Exception:
                 pass
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count} attempts={ATTEMPTS['total']}\n", encoding="utf-8")
-    log(f"Finished. {'Tested' if DRY_RUN else 'Confirmed applications'}: {count} | {'previews' if DRY_RUN else 'Submit attempts'}: {ATTEMPTS['total']}")
+    log('Finished. ' + METRICS.summary(submit_attempts=0 if DRY_RUN else ATTEMPTS['total']))
     return 0
 
 

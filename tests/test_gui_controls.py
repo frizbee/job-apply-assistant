@@ -38,6 +38,17 @@ class GUIControlTests(unittest.TestCase):
     def test_technology_fields_start_empty_without_silent_defaults(self):
         result = self.run_ui()
         self.assertEqual(result['technologyValues'], {'target': '', 'excluded': ''})
+        self.assertEqual(result['titleExclusions'], '')
+
+    def test_title_exclusions_roundtrip_and_clear_without_defaults(self):
+        result = self.run_ui(scenario='technology-start', settings={'excluded_title_words': ['Marketing']},
+                             excludedTitleText=' Sales \nProduct Marketing\n')
+        self.assertEqual(result['titleExclusions'], 'Marketing')
+        body = json.loads(next(r for r in result['requests'] if r['path'] == '/api/start')['body'])
+        self.assertEqual(body['excluded_title_words'], ['Sales', 'Product Marketing'])
+        result = self.run_ui(scenario='technology-start', settings={'excluded_title_words': ['Marketing']}, excludedTitleText='')
+        body = json.loads(next(r for r in result['requests'] if r['path'] == '/api/start')['body'])
+        self.assertEqual(body['excluded_title_words'], [])
 
     def test_technology_fields_load_save_and_clear_through_real_javascript(self):
         settings = {'target_technologies': ['ArbitraryStack', 'C++'], 'excluded_technologies': ['OtherStack']}

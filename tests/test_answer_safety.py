@@ -21,6 +21,7 @@ class SafetyTest(unittest.TestCase):
             "english": "3", "salary": "60000", "currency": "USD", "notice": "0",
         }))
         self.enterContext(patch.object(apply, 'ATTEMPTS', {'total': 0, 'by_source': {}}))
+        self.enterContext(patch.object(apply, 'METRICS', apply.RunMetrics()))
         self.enterContext(patch.object(apply, "pause"))
         self.enterContext(patch.object(apply, "log"))
         self.enterContext(patch.object(apply, "screenshot"))

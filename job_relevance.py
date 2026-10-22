@@ -1,8 +1,9 @@
 """Technology filtering driven exclusively by user-reviewed GUI settings."""
 import re
 
-VERSION = 'user-technology-filters-v1'
+VERSION = 'user-filters-v2'
 FIELDS = ('target_technologies', 'excluded_technologies')
+USER_FIELDS = (*FIELDS, 'excluded_title_words')
 REQUIRED = re.compile(r'\brequired\b|\bmust\b|\bmandatory\b|\bproficien|\bstrong (?:experience|knowledge)|\bexperience (?:with|in)|\bexpertise in|\b(?:build|develop|work).*\b(?:using|with|in)\b|requisito|obligatorio|experiencia (?:en|con)|experiência (?:em|com)', re.I)
 OPTIONAL = re.compile(r'nice.to.have|preferred|\bbonus\b|\ba plus\b|optional|not required|not necessary|no .*required|deseable|diferencial|valorable', re.I)
 REQUIRED_HEADING = re.compile(r'((?:technical |minimum |essential )?(?:requirements|qualifications)|what you bring|what you need|must.have|requisitos(?: técnicos)?|required skills)[:\s]*', re.I)
@@ -12,12 +13,12 @@ OTHER_HEADING = re.compile(r'(benefits|responsibilities|what we offer|about (?:u
 
 def validate_settings(settings: dict) -> None:
     """Reject malformed lists and contradictory user rules before a run starts."""
-    for field in FIELDS:
+    for field in USER_FIELDS:
         values = settings.get(field, [])
         if (not isinstance(values, list) or len(values) > 100
                 or any(not isinstance(v, str) or not v.strip() or len(v) > 100
                        or any(ord(c) < 32 for c in v) for v in values)):
-            raise ValueError(f'settings.{field}: expected up to 100 nonblank single-line technologies (100 characters each)')
+            raise ValueError(f'settings.{field}: expected up to 100 nonblank single-line terms (100 characters each)')
     targets = {v.strip().casefold() for v in settings.get('target_technologies', [])}
     excluded = {v.strip().casefold() for v in settings.get('excluded_technologies', [])}
     if targets & excluded:
@@ -28,6 +29,11 @@ def matches(technology: str, text: str) -> bool:
     """Literal case-insensitive terms, not user regex; preserve C++, C#, .NET."""
     pattern = re.escape(technology.strip()).replace(r'\ ', r'\s+')
     return bool(re.search(rf'(?<![\w+#.]){pattern}(?![\w+#])', text, re.I))
+
+
+def excluded_title_word(title: str, settings: dict) -> str | None:
+    """Only explicit user terms, matched literally against the title, not body."""
+    return next((term for term in settings.get('excluded_title_words', []) if matches(term, title)), None)
 
 
 def assess(title: str, description: str, *, target_technologies=(), excluded_technologies=()) -> dict:

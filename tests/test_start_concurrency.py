@@ -297,22 +297,25 @@ class StartConcurrencyTests(SafetyTest):
 
     def test_technology_settings_are_saved_and_applied_without_invented_defaults(self):
         body = self.body()
-        body.update(target_technologies=[' ArbitraryStack ', 'C++'], excluded_technologies=['OtherStack'])
+        body.update(target_technologies=[' ArbitraryStack ', 'C++'], excluded_technologies=['OtherStack'], excluded_title_words=[' Marketing '])
         self.finalize.side_effect = self.real_finalize
         self.assertEqual(gui.start(body), {'ok': True})
         saved = json.loads(apply.SETTINGS_FILE.read_text(encoding='utf-8'))
         self.assertEqual(saved['target_technologies'], ['ArbitraryStack', 'C++'])
         self.assertEqual(saved['excluded_technologies'], ['OtherStack'])
+        self.assertEqual(saved['excluded_title_words'], ['Marketing'])
         self.assertIsNone(apply.job_ok('Software Engineer', 'Example', 'ArbitraryStack with Python required.'))
         self.assertEqual(apply.job_ok('Software Engineer', 'Example', 'OtherStack required.'), 'excluded_technology')
         self.finish_worker()
-        body.update(target_technologies=[], excluded_technologies=[])
+        body.update(target_technologies=[], excluded_technologies=[], excluded_title_words=[])
         self.assertEqual(gui.start(body), {'ok': True})
+        self.assertEqual(apply.SETTINGS['excluded_title_words'], [])
         self.assertIsNone(apply.job_ok('Software Engineer', 'Example', 'OtherStack required.'))
 
     def test_bad_or_conflicting_technology_rules_do_not_publish_or_start(self):
         for rules in [{'excluded_technologies': 'Python'}, {'target_technologies': [1]},
-                      {'excluded_technologies': ['x\ny']},
+                      {'excluded_technologies': ['x\ny']}, {'excluded_title_words': 'Marketing'},
+                      {'excluded_title_words': ['']},
                       {'target_technologies': ['Ruby'], 'excluded_technologies': ['ruby']}]:
             before = self.snapshot()
             body = {**self.body(), **rules}
