@@ -163,10 +163,10 @@ def pause(a: float = 1.5, b: float = 3.5) -> None:
 
 def load_applied() -> dict:
     try:
-        applied = json.loads(APPLIED_FILE.read_text())
+        applied = json.loads(APPLIED_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise RuntimeError("Application history is corrupt; restore it before running to avoid duplicate submissions") from e
     if not isinstance(applied, dict) or any(not isinstance(v, dict) or not isinstance(v.get("status"), str)
                                           for v in applied.values()):
@@ -194,7 +194,7 @@ def load_applied() -> dict:
 
 def write_applied(applied: dict) -> None:
     temporary = APPLIED_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(applied, indent=1, ensure_ascii=False))
+    temporary.write_text(json.dumps(applied, indent=1, ensure_ascii=False), encoding="utf-8")
     temporary.replace(APPLIED_FILE)
 
 
@@ -1673,7 +1673,7 @@ def ask_settings() -> None:
 
 
 def load_settings() -> dict:
-    saved = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")) if SETTINGS_FILE.exists() else {}
     SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "currency": "USD", "english": "3", "notice": "14", **saved})
     return SETTINGS
 
@@ -1683,7 +1683,7 @@ def finalize_settings() -> None:
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
-    SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2))
+    SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2), encoding="utf-8")
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
@@ -1703,8 +1703,8 @@ def api_key() -> str:
 
 def save_key(key: str) -> None:
     env = HOME / ".env"
-    lines = [l for l in (env.read_text().splitlines() if env.exists() else []) if not l.startswith("OPENROUTER_API_KEY=")]
-    env.write_text("\n".join(lines + [f"OPENROUTER_API_KEY={key}"]) + "\n")
+    lines = [l for l in (env.read_text(encoding="utf-8").splitlines() if env.exists() else []) if not l.startswith("OPENROUTER_API_KEY=")]
+    env.write_text("\n".join(lines + [f"OPENROUTER_API_KEY={key}"]) + "\n", encoding="utf-8")
 
 
 def find_key() -> str:
@@ -1713,7 +1713,7 @@ def find_key() -> str:
         return os.environ["OPENROUTER_API_KEY"]
     env = HOME / ".env"
     if env.exists():
-        m = re.search(r"^OPENROUTER_API_KEY=(.+)$", env.read_text(), re.M)
+        m = re.search(r"^OPENROUTER_API_KEY=(.+)$", env.read_text(encoding="utf-8"), re.M)
         if m:
             return m.group(1).strip().strip("'\"")
     return ""
@@ -1948,7 +1948,7 @@ def run_bot(*, reset_stop: bool = True) -> int:
                 ctx.close()
             except Exception:
                 pass
-    LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count}\n")
+    LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count}\n", encoding="utf-8")
     log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count}")
     return 0
 

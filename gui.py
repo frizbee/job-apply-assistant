@@ -575,7 +575,7 @@ def selftest() -> None:
         title = page.title()
         # OpenRouter'a HTTPS bağlantısı (sertifikalar pakette mi): model listesi anahtarsız açılır
         models = cv_profile.request("/models", "")["data"]
-        (apply.HOME / "selftest.txt").write_text(f"{title} models={len(models)}")  # pencereli uygulamada konsol yok
+        (apply.HOME / "selftest.txt").write_text(f"{title} models={len(models)}", encoding="utf-8")  # pencereli uygulamada konsol yok
         ctx.close()
 
 
