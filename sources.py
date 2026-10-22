@@ -285,7 +285,7 @@ def wellfound_search_verified(page, requested_url: str, keyword: str) -> bool:
     return False
 
 
-def wellfound(page):
+def _wellfound_public(page):
     seen = set()
     for kw in core.CFG["search"]["keywords"]:
         search_url = f"https://wellfound.com/role/r/{slug(kw)}"
@@ -324,6 +324,68 @@ def wellfound(page):
             job = {"id": f"wellfound:{jid}", "title": title, "company": company, "url": url,
                    "desc": description, "location": "", 'metadata': metadata}
             yield job, (lambda applied=None, job=job: wellfound_apply(page, job, applied))
+
+
+def wellfound(page):
+    """Use native literal keyword search when signed in; preserve strict public fallback."""
+    from wellfound_search import NativeSearch, SearchUnavailable
+    search_page = page.context.new_page()
+    search_page.set_default_timeout(6000)
+    search = NativeSearch(search_page, core)
+    try:
+        try:
+            search.start()
+        except SearchUnavailable as e:
+            core.log(f'  ! Wellfound native keyword search unavailable: {e}. Trying only verifiable exact public roles.')
+            yield from _wellfound_public(page)
+            return
+        seen = set()
+        for keyword in list(core.CFG['search']['keywords']):
+            if core.STOP.is_set():
+                raise core.Stopped
+            if time.time() > core.DEADLINE:
+                return
+            try:
+                jobs, more = search.search(keyword)
+            except SearchUnavailable as e:
+                core.METRICS.mark('searches_failed', f'wellfound:{keyword}')
+                core.log(f'  ! Wellfound native search failed for {keyword!r}: {e}')
+                continue
+            core.METRICS.mark('searches_verified', f'wellfound:{keyword}')
+            # A previously failed login must not remain cached after the
+            # authenticated native search has demonstrably succeeded.
+            LOGGED_IN['wellfound'] = True
+            core.log(f'  Wellfound native keyword {keyword!r}: {len(jobs)} job listings. '
+                     f'Site company-region scope: {search.company_region_label or "not specified"}. '
+                     'GUI regions are not mapped here; Wellfound may additionally limit results by account location.')
+            if more:
+                core.log('  ! Wellfound has more native results; only the first page is currently supported.')
+            for job in jobs:
+                if job['id'] in seen:
+                    continue
+                seen.add(job['id'])
+                core.METRICS.mark('seen', job['id'])
+                history = core.load_applied()
+                identity_prefix = job['id'].split('-', 1)[0]
+                previous = [value for key, value in history.items()
+                            if key == identity_prefix or key.startswith(identity_prefix + '-')]
+                protected = any(not core.can_retry(value['status'])
+                                and value['status'] not in core.job_rechecks.RECHECKABLE for value in previous)
+                if job.pop('provider_applied') or protected:
+                    core.METRICS.mark('history_skipped', job['id'])
+                    continue
+                workplace = job.pop('native_workplace')
+                job['metadata'] = {'posted_at': job.pop('native_posted_at'),
+                                   'workplace': job_metadata.workplace_kind(workplace.replace('_', ' ') if isinstance(workplace, str) else None,
+                                                                           job.pop('native_remote')),
+                                   'location': job['location'],
+                                   'diagnostic': {'source': 'wellfound_native_results',
+                                                  'keyword': keyword, 'page': 1,
+                                                  'company_region_scope': search.company_region_label,
+                                                  'gui_regions_applied': False}}
+                yield job, (lambda applied=None, job=job: wellfound_apply(page, job, applied))
+    finally:
+        search.close()
 
 
 # ---------------------------------------------------------------- Indeed

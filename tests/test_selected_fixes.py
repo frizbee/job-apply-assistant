@@ -171,7 +171,7 @@ class WellfoundFormTests(SafetyTest):
             else:
                 request.fulfill(content_type='text/html', body=self.html)
         self.ctx.route('**/*', route)
-        self.assertEqual(list(sources.wellfound(self.page)), [])
+        self.assertEqual(list(sources._wellfound_public(self.page)), [])
         self.assertEqual(apply.METRICS.snapshot()['searches_failed'], 1)
         self.assertEqual(apply.METRICS.snapshot()['seen'], 0)
         self.assertTrue(any('generic results will not be processed' in str(c) for c in apply.log.call_args_list))

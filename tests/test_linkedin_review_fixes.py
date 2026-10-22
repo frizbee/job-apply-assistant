@@ -362,7 +362,7 @@ class BrowserLinkedinLayoutTests(SafetyTest):
             '@type': 'JobPosting', 'url': url, 'title': 'Engineer', 'description': 'Ruby backend.',
             'datePosted': '2026-10-20', 'jobLocationType': 'TELECOMMUTE'}) + '</script>'
         apply.CFG['search']['keywords'] = ['Engineer']
-        job, _ = next(sources.wellfound(self.page))
+        job, _ = next(sources._wellfound_public(self.page))
         self.assertEqual(job['desc'], 'Ruby backend.')
         self.assertIsNone(job_relevance.reason(job['title'], job['desc'], excluded_technologies=['Python']))
 
@@ -373,6 +373,6 @@ class BrowserLinkedinLayoutTests(SafetyTest):
         self.enterContext(patch.object(sources, 'goto', side_effect=lambda page, url, name: (page.goto(url), True)[1]))
         self.html = '<title>Engineer at Example • Remote</title><div class="select__control"><span class="select__single-value">Engineer</span><input id="react-select-1-input"></div><a href="/jobs/123-engineer">Job</a><aside>Ruby backend; Python is required.</aside>'
         apply.CFG['search']['keywords'] = ['Engineer']
-        job, _ = next(sources.wellfound(self.page))
+        job, _ = next(sources._wellfound_public(self.page))
         self.assertEqual(job['desc'], '')
         self.assertEqual(job_relevance.reason(job['title'], job['desc'], target_technologies=['Ruby'], excluded_technologies=['Python']), 'stack_unknown')
