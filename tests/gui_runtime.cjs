@@ -25,6 +25,7 @@ const buttons = [...markup.match(/<div class="lang">([\s\S]*?)<\/div>/)[1].match
 const body = { innerHTML: "" };
 const document = {
   body,
+  documentElement: { lang: "en" },
   getElementById(id) { return body.innerHTML ? null : elements.get(id); },
   querySelectorAll(selector) {
     if (selector === "[data-t]") return translated;

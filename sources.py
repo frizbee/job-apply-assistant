@@ -1,12 +1,12 @@
-"""LinkedIn dışındaki iş kaynakları.
+"""Job sources other than LinkedIn.
 
-- Wellfound ve Indeed: sitenin kendi hızlı başvurusu (giriş gerekir; ilk seferde pencerede yapılır)
-- Remote OK, Himalayas, We Work Remotely: ilanlar API/RSS'ten toplanır, başvuru şirket
-  sitesindeki forma gider (apply.apply_form: Greenhouse/Lever/Ashby, sınırlı ve aralıklı;
-  diğerleri data/manual_apply.csv'ye yazılır)
+Wellfound and Indeed use their own application flows and may require manual login.
+Remote OK, Himalayas and We Work Remotely collect jobs through APIs/RSS and link
+to company forms. Approved ATS forms use apply.apply_form with quotas/cooldowns;
+unsupported forms are recorded in data/manual_apply.csv.
 
-Her kaynak ilanları üretir; ortak döngü filtreler, aynı ilanı ikinci kez başvurmaz
-(farklı sitelerde aynı şirket+başlık dahil), sonucu kaydeder.
+Each source yields jobs; the shared loop filters, deduplicates across sources
+using company/title keys, and records outcomes.
 """
 import datetime as dt
 import html
@@ -23,10 +23,10 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0 Safari/537.36")
 GENERIC_WORDS = {"and", "the", "of", "for", "with", "senior", "junior", "remote"}
 LOGGED_IN: dict[str, bool] = {}
-core = None  # apply modülü; run() içinde atanır
+core = None  # The apply module, assigned by run().
 
 
-# ---------------------------------------------------------------- yardımcılar
+# ---------------------------------------------------------------- helpers
 
 def http(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, text/xml, */*"})
@@ -45,7 +45,7 @@ def fresh(ts: dt.datetime | float | None) -> bool:
 
 
 def keyword_match(title: str) -> bool:
-    """Arama sorgusu olmayan kaynaklarda başlık, aranan pozisyonlardan birinin tüm kelimelerini içermeli."""
+    """On queryless sources, require all meaningful words of a configured job title."""
     t = title.lower()
     for kw in core.CFG["search"]["keywords"]:
         words = [w for w in re.findall(r"[\w+#.]+", kw.lower()) if w not in GENERIC_WORDS]
@@ -65,7 +65,7 @@ def page_ready(page) -> bool:
 def goto(page, url: str, what: str) -> bool:
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     core.pause(2, 4)
-    return core.wait_human(page, page_ready, f"{what} güvenlik doğrulamasını geç")
+    return core.wait_human(page, page_ready, f"complete the {what} security verification")
 
 
 def click_apply(page) -> str | None:
@@ -141,7 +141,7 @@ def wwr_login(page) -> bool:
         page.goto("https://weworkremotely.com/job-seekers/account/login", wait_until="domcontentloaded")
         LOGGED_IN["wwr"] = core.wait_human(
             page, lambda p: not re.search(r"account/(login|register|sign)", p.url) and page_ready(p),
-            "We Work Remotely'ye giriş yap (ücretsiz hesap; başvuru linkleri girişle görünüyor)")
+            "sign in to We Work Remotely (a free account is required to view application links)")
     return LOGGED_IN["wwr"]
 
 
@@ -182,7 +182,7 @@ def wellfound_login(page) -> bool:
         if not logged(page):
             page.goto("https://wellfound.com/login", wait_until="domcontentloaded")
         LOGGED_IN["wellfound"] = core.wait_human(
-            page, lambda p: "/login" not in p.url and logged(p), "Wellfound'a giriş yap", minutes=10)
+            page, lambda p: "/login" not in p.url and logged(p), "sign in to Wellfound", minutes=10)
     return LOGGED_IN["wellfound"]
 
 
@@ -200,7 +200,7 @@ def wellfound_apply(page, job: dict, applied: dict | None = None) -> str:
         return "manual_review"
     core.pause(3, 4)
     if len(ctx.pages) > before or not page.url.startswith("https://wellfound.com"):
-        # Başvuru şirket sitesinde
+        # The application continues on a company site.
         new = ctx.pages[-1] if len(ctx.pages) > before else page
         url = new.url
         if new is not page:
@@ -245,7 +245,7 @@ def wellfound(page):
                 continue
             if not goto(page, url, "Wellfound"):
                 return
-            # Sayfa başlığı: "Machine Learning Engineer at Noesia • San Francisco • Remote"
+            # Page title: "Machine Learning Engineer at Noesia • San Francisco • Remote".
             m = re.match(r"(.+?) at (.+?)(?: •|$)", page.title())
             title, company = (m.group(1), m.group(2)) if m else (page.title(), "")
             job = {"id": f"wellfound:{jid}", "title": title, "company": company, "url": url,
@@ -275,10 +275,10 @@ def indeed_apply(page, job: dict, applied: dict | None = None) -> str:
         core.pause(1.5, 3)
         if re.search(r"secure\.indeed\.com/(auth|account)", ap.url):
             if not core.wait_human(ap, lambda p: not re.search(r"secure\.indeed\.com/(auth|account)", p.url),
-                                   "Indeed'e giriş yap", minutes=10):
+                                   "sign in to Indeed", minutes=10):
                 return "blocked"
             continue
-        if not core.wait_human(ap, page_ready, "Indeed güvenlik doğrulamasını geç"):
+        if not core.wait_human(ap, page_ready, "complete the Indeed security verification"):
             return "blocked"
         scope = ap.locator("main").first if ap.locator("main").count() else ap.locator("body")
         unanswered = core.fill_step(ap, scope, external=True)
@@ -339,7 +339,7 @@ def indeed(page):
             yield job, (lambda applied=None, job=job: indeed_apply(page, job, applied))
 
 
-# ---------------------------------------------------------------- ortak döngü
+# ---------------------------------------------------------------- shared source loop
 
 SOURCES = {
     "wellfound": wellfound,
@@ -366,7 +366,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
         try:
             for job, apply in source(page):
                 if count >= limits["max_applications_per_run"] or core.submission_quota_status() or time.time() > core.DEADLINE:
-                    core.log("Günlük limit/süre doldu.")
+                    core.log("Run application limit or runtime limit reached.")
                     return count
                 if done >= limits.get("per_source", 15) or core.submission_quota_status(name):
                     break
@@ -376,7 +376,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
-                    core.log(f"- atla [{reason}] {job['title']} @ {job['company']}")
+                    core.log(f"- skip [{reason}] {job['title']} @ {job['company']}")
                     core.record(applied, job["id"], job["title"], job["company"], reason, job["url"])
                     continue
                 metadata = job.get("metadata") or {}
@@ -396,7 +396,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 except Exception as e:
                     if core.browser_closed(e):
                         raise core.BrowserClosed() from None
-                    core.log(f"  ! hata: {e.__class__.__name__}: {str(e)[:150]}")
+                    core.log(f"  ! error: {e.__class__.__name__}: {str(e)[:150]}")
                     core.screenshot(page, f"{job['id'].replace(':', '_')}_error")
                     # A durable submit state must survive exceptions in any caller.
                     status = applied.get(job["id"], {}).get("status")
@@ -409,11 +409,11 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                     count += 1
                     done += 1
                 if status == "blocked":
-                    core.log(f"  {name} erişimi engelledi, sonraki kaynağa geçiliyor.")
+                    core.log(f"  Access to {name} was blocked; moving to the next source.")
                     break
                 core.pause(4, 9)
         except Exception as e:
             if core.browser_closed(e):
                 raise core.BrowserClosed() from None
-            core.log(f"  ! {name} okunamadı: {e.__class__.__name__}: {str(e)[:150]}")
+            core.log(f"  ! could not read {name}: {e.__class__.__name__}: {str(e)[:150]}")
     return count

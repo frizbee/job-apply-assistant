@@ -370,7 +370,7 @@ class ProfileBoundaryTests(SafetyTest):
         apply.SETTINGS.update(cv_profile={**profile(), "job_titles": "Engineer"},
                               cv_hash=hashlib.sha256(self.resume.read_bytes()).hexdigest())
         with patch.object(apply, "api_key", return_value="key"), patch.object(cv_profile, "extract", return_value=profile()) as extract, \
-                patch.object(apply, "ask", return_value="e"), patch.object(apply, "show_profile") as display, patch("builtins.print"):
+                patch.object(apply, "ask", return_value="y"), patch.object(apply, "show_profile") as display, patch("builtins.print"):
             apply.cv_setup()
         extract.assert_called_once()
         display.assert_called_once()
@@ -378,7 +378,7 @@ class ProfileBoundaryTests(SafetyTest):
 
     def test_invalid_terminal_edit_keeps_last_valid_profile(self):
         apply.SETTINGS.update(cv_profile=profile(), cv_hash=hashlib.sha256(self.resume.read_bytes()).hexdigest())
-        with patch.object(apply, "ask", side_effect=["p", "e"]), patch.object(apply, "show_profile"), \
+        with patch.object(apply, "ask", side_effect=["t", "y"]), patch.object(apply, "show_profile"), \
                 patch("builtins.input", return_value="x" * 201), patch("builtins.print"), patch.object(cv_profile, "extract") as extract:
             apply.cv_setup()
         extract.assert_not_called()

@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------
-# LinkedIn Easy Apply ayarları. Her şeyi buradan değiştirebilirsin.
-# CV analizi onaylanırsa pozisyonlar, başlık filtresi ve
-# profil bilgileri CV'den gelen değerlerle değiştirilir (bu dosya değişmez).
+# Job application settings and defaults.
+# A reviewed CV profile overrides job titles, title filters and personal details
+# in memory; this configuration file is not changed.
 # ---------------------------------------------------------------
 
 # LLM profiles: only OpenRouter free_auto is implemented at this stage.
@@ -33,22 +33,22 @@ llm:
       timeout_seconds: 180
 
 search:
-  # Arayüzde/CV'den gelen pozisyonlar bunun yerine kullanılır
+  # Job titles from the GUI/reviewed CV override these defaults.
   keywords:
     - "Software Engineer"
   locations:
     - "European Union"
     - "United Kingdom"
     - "United States"
-  remote_only: true            # sadece remote ilanlar (f_WT=2)
-  posted_within_hours: 168     # son 1 haftada yayınlanan ilanlar
+  remote_only: true            # Remote jobs only (f_WT=2).
+  posted_within_hours: 168     # Jobs posted in the last week.
   experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
-  pages_per_search: 2          # her arama için kaç sayfa (25 ilan/sayfa)
-  # Remote panolarda konum kısıtı olan ilanlar bunlardan birine uymalı (regex); ülke de kabul edilir
+  pages_per_search: 2          # Pages per search (25 jobs/page).
+  # Restricted locations must match this pattern or the profile's country.
   accepted_regions: 'anywhere|worldwide|global|europe|emea|\beu\b|cet'
 
 filters:
-  # Başlık bunlardan en az birine uymalı (regex, küçük harf)
+  # Job titles must match at least one pattern (lowercase regex).
   title_include:
     - '\bai\b|a\.i\.|artificial intelligence'
     - 'machine learning|\bml\b|mlops|deep learning|computer vision|\bcv\b'
@@ -56,10 +56,10 @@ filters:
     - 'data|analyst|analytics|scien|research'
     - 'python|backend|back-end|software|developer|engineer|automation|platform|cloud|api'
     - 'yapay zeka|veri|yazılım|mühendis|geliştirici|analist|otomasyon'
-  # Başlıkta bunlar varsa atla
+  # Skip titles matching these patterns.
   title_exclude:
     - 'intern|internship|stajyer|werkstudent|praktikum|trainee'
-  # İlan metninde bunlar varsa atla (ör. yerel dil şartı)
+  # Skip descriptions matching these patterns (e.g. local language requirements).
   description_exclude:
     - 'fluent (in )?(german|french|dutch|spanish|italian|polish)'
     - '(german|french|dutch)[- ]speaking'
@@ -67,32 +67,32 @@ filters:
     - 'us citizens? only'
   exclude_companies: []
 
-# İlan kaynakları. LinkedIn/Wellfound/Indeed kendi hızlı başvurusunu kullanır (ilk seferde
-# açılan pencerede giriş yapılır). Remote OK/Himalayas/We Work Remotely ilanları şirket
-# sitesindeki forma gider (aşağıdaki external ayarları geçerli).
+# LinkedIn/Wellfound/Indeed use their own application flows; sign in manually.
+# Remote OK/Himalayas/We Work Remotely link to company forms, subject to the
+# external settings below.
 sources:
   linkedin: true
   wellfound: true
   indeed: true
   indeed_domain: "www.indeed.com"
-  indeed_easy_apply_only: false   # true: sadece "Easily apply" ilanları
+  indeed_easy_apply_only: false   # true: only "Easily apply" jobs.
   remoteok: true
   himalayas: true
   weworkremotely: true
 
-# Şirket sitesindeki formlar (Greenhouse, Lever, Ashby otomatik; diğerleri
-# data/manual_apply.csv'ye yazılır). Spam sayılmamak için az ve aralıklı.
+# Approved company forms (Greenhouse, Lever, Ashby); other sites are recorded
+# in data/manual_apply.csv. Limit attempts and leave time between them.
 external:
   enabled: true
-  max_per_run: 5            # çalıştırma başına en fazla şirket formu
-  min_wait_seconds: 180     # iki şirket formu arası bekleme
+  max_per_run: 5            # Maximum company forms per run.
+  min_wait_seconds: 180     # Cooldown between company forms.
 
 limits:
-  max_applications_per_run: 40   # tüm kaynaklar: Submit denemeleri (belirsiz/reddedilen dahil); test modunda önizlemeler
-  per_source: 15                 # tek kaynak için aynı deneme/önizleme sınırı; ATS kaynak platforma sayılır
+  max_applications_per_run: 40   # Submit attempts, including uncertain/rejected; previews in test mode.
+  per_source: 15                 # Per-board attempt/preview cap; ATS forms count toward their source board.
   max_runtime_minutes: 90
 
-# Kişisel bilgiler arayüzden / CV'den doldurulur; burada sadece varsayılanlar var.
+# Personal details are supplied through the GUI/reviewed CV; these are defaults.
 profile:
   first_name: ""
   last_name: ""
@@ -100,7 +100,7 @@ profile:
   email: ""
   phone: ""
   phone_intl: ""
-  current_company: ""          # dış formlarda "şu anki şirket" alanı (boşsa doldurulmaz)
+  current_company: ""          # External "current company" field; not filled if unknown.
   current_title: ""
   city: ""
   country: ""
@@ -118,20 +118,20 @@ skill_years: {}
 # No answers are inferred from residence, remote work, or the CV for legal questions.
 confirmed_answers: {}
 
-# Form soruları için kurallar. Soru metni (küçük harf) "match" regex'ine uyarsa
-# "answer" kullanılır. Liste verirsen seçenekli sorularda sırayla denenir.
-# Sıra önemli: ilk eşleşen kazanır. Bilinmeyen sorular manuel incelemeye gider.
-# Vize, çalışma izni, eğitim, diğer diller ve hukuki onaylar için varsayılan yoktur.
-# Hassas soruların tam metni için yukarıdaki confirmed_answers alanını kullanın.
+# Form-answer rules match lowercase question text. The first matching rule wins.
+# Lists provide candidate answers for single-choice questions and complete sets
+# for checkbox groups. Unknown questions require manual review.
+# No defaults for visas, work authorization, education, other languages or legal consent.
+# Use exact question-specific confirmed_answers above for sensitive questions.
 answers:
   - match: 'country code|ülke.*kodu'
-    answer: "__COUNTRY_CODE__"   # telefondan, ör. "(+90)"
+    answer: "__COUNTRY_CODE__"   # Derived from the phone, e.g. "(+90)".
   - match: 'phone|mobile|telefon'
     answer: "__PHONE__"
   - match: 'english|angielski|englisch|anglais|inglés|ingilizce'
-    answer: "__ENGLISH__"      # başlangıçta sorulan seviye
+    answer: "__ENGLISH__"      # User-selected English level.
   - match: 'salary|compensation|ücret|maaş|\brate\b|hourly'
-    answer: "__SALARY__"       # başlangıçta sorulan yıllık beklenti
+    answer: "__SALARY__"       # Explicit salary expectations, converted only with known units.
   - match: 'notice period|ihbar'
     answer: "__NOTICE__"
   - match: 'gender|race|ethnic|veteran|disabilit|pronoun|sexual orientation'

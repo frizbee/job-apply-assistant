@@ -42,15 +42,26 @@ class GUIControlTests(unittest.TestCase):
         self.assertEqual([s["quitText"] for s in result["switched"]], ["Kapat", "Quit"])
         self.assertTrue(all(s["active"] and s["english"] == "3" for s in result["switched"]))
 
-    def test_invalid_stored_language_uses_browser_fallback(self):
+    def test_invalid_stored_language_uses_english_default(self):
         for value in ["undefined", "ru", "constructor", "__proto__", "", None]:
             with self.subTest(saved=value):
                 self.assertEqual(self.run_ui(saved=value)["lang"], "en")
-        self.assertEqual(self.run_ui(saved="invalid", navigator="tr-TR")["lang"], "tr")
+        self.assertEqual(self.run_ui(saved="invalid", navigator="tr-TR")["lang"], "en")
 
     def test_valid_saved_language_overrides_browser_default(self):
         self.assertEqual(self.run_ui(saved="en", navigator="tr-TR")["lang"], "en")
         self.assertEqual(self.run_ui(saved="tr", navigator="en-US")["lang"], "tr")
+
+    def test_english_is_default_even_with_turkish_browser(self):
+        result = self.run_ui(navigator="tr-TR")
+        self.assertEqual(result['lang'], 'en')
+        self.assertEqual(result['quitText'], 'Quit')
+        self.assertIsNone(result['stored'])
+
+    def test_english_default_survives_blocked_storage_and_turkish_browser(self):
+        result = self.run_ui(navigator='tr-TR', blockStorage=True)
+        self.assertEqual(result['lang'], 'en')
+        self.assertEqual(result['quitText'], 'Quit')
 
     def test_disabled_storage_does_not_break_switching(self):
         result = self.run_ui(scenario="blocked-switch", blockStorage=True, navigator="en-US")
@@ -133,6 +144,17 @@ class BrowserGUIControlTests(SafetyTest):
         self.assertEqual(self.page.locator("#quit").inner_text(), "Quit")
         self.page.locator('[data-l="tr"]').click()
         self.assertEqual(self.page.evaluate("localStorage.getItem('lang')"), "tr")
+        self.assertEqual(self.errors, [])
+
+    def test_turkish_browser_defaults_to_english_and_can_explicitly_switch(self):
+        self.context.add_init_script("Object.defineProperty(navigator, 'language', {get: () => 'tr-TR'})")
+        self.page.goto('http://autoapply.test/')
+        self.page.wait_for_function("document.getElementById('english').value === '3'")
+        self.assertEqual(self.page.locator('#quit').inner_text(), 'Quit')
+        self.assertEqual(self.page.locator('html').get_attribute('lang'), 'en')
+        self.page.locator('[data-l="tr"]').click()
+        self.assertEqual(self.page.locator('#quit').inner_text(), 'Kapat')
+        self.assertEqual(self.page.locator('html').get_attribute('lang'), 'tr')
         self.assertEqual(self.errors, [])
 
     def test_invalid_cached_profile_message_is_visible_without_js_error(self):

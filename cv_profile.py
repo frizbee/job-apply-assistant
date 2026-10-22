@@ -1,7 +1,7 @@
-"""CV'yi OpenRouter'daki ÜCRETSİZ bir dil modeliyle okuyup başvuru profili çıkarır.
+"""Extract an application profile from a CV using free OpenRouter models.
 
-Sadece fiyatı 0 olan (":free") modeller kullanılır; bu, her çağrıdan önce OpenRouter'ın
-model listesinden doğrulanır. Ücretli modele hiçbir koşulda istek gönderilmez.
+Only zero-priced :free models are eligible. Paid generation is not supported
+by this adapter; profile results are validated locally before use.
 """
 import json
 import re
@@ -12,13 +12,13 @@ import zipfile
 from pathlib import Path
 
 API = "https://openrouter.ai/api/v1"
-# Derlenmiş uygulamada sistem sertifikaları bulunamayabiliyor; certifi paketiyle gelenleri kullan
+# Use certifi because system certificates may be unavailable in packaged builds.
 try:
     import certifi
     SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 except ImportError:
     SSL_CTX = ssl.create_default_context()
-# Tercih sırası; listede olmayan/ücretli hale gelenler atlanır, hiçbiri yoksa herhangi bir ücretsiz model
+# Preferred order; skip unavailable/paid models and fall back to eligible free models.
 PREFERRED = [
     "nvidia/nemotron-3-super-120b-a12b:free",
     "google/gemma-4-31b-it:free",
@@ -96,7 +96,7 @@ def request(path: str, key: str, body: dict | None = None, *, timeout_seconds: i
 
 
 def free_models(key: str, *, timeout_seconds: int = 180) -> list[tuple[str, bool]]:
-    """(model, structured_outputs) listesi; sadece istem ve yanıt fiyatı 0 olan modeller."""
+    """Return (model, structured_outputs) pairs with zero-priced input/output."""
     free = {}
     for m in request("/models", key, timeout_seconds=timeout_seconds)["data"]:
         p = m.get("pricing", {})
@@ -104,7 +104,7 @@ def free_models(key: str, *, timeout_seconds: int = 180) -> list[tuple[str, bool
             free[m["id"]] = "structured_outputs" in m.get("supported_parameters", [])
     ordered = [m for m in PREFERRED if m in free] + sorted(m for m in free if m not in PREFERRED and free[m])
     if not ordered:
-        raise NoFreeModel("OpenRouter'da şu an ücretsiz model yok")
+        raise NoFreeModel("No eligible free OpenRouter model is currently available")
     return [(m, free[m]) for m in ordered]
 
 
@@ -192,7 +192,7 @@ def extract(path: Path, key: str, log=print, *, max_output_tokens: int = 4096, t
         raise ValueError('Invalid request timeout')
     text = cv_text(path).strip()
     if len(text) < 200:
-        raise ValueError("CV'den metin okunamadı (taranmış/resim PDF olabilir)")
+        raise ValueError("Could not extract enough CV text (the PDF may be scanned or image-only)")
     prompt = PROMPT.format(schema=json.dumps(SCHEMA), cv=text[:60000])
     errors = []
     for model, structured in free_models(key, timeout_seconds=timeout_seconds)[:4]:
@@ -207,10 +207,10 @@ def extract(path: Path, key: str, log=print, *, max_output_tokens: int = 4096, t
             prof = parse_json(resp["choices"][0]["message"]["content"] or "")
             return validate(prof)
         except urllib.error.HTTPError as e:
-            errors.append(f"{model}: HTTP {e.code}")  # 429 = ücretsiz kota doldu, sonraki modele geç
+            errors.append(f"{model}: HTTP {e.code}")  # On rate limits, try the next eligible free model.
         except ProfileValidationError as e:
             errors.append(f"{model}: {e}")
         except (KeyError, IndexError, TypeError, ValueError, TimeoutError, urllib.error.URLError) as e:
             errors.append(f"{model}: {e.__class__.__name__}")
-        log(f"  {errors[-1]}, başka ücretsiz model deneniyor...")
+        log(f"  {errors[-1]}; trying another free model...")
     raise RuntimeError("; ".join(errors))

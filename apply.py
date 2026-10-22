@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""LinkedIn Easy Apply botu.
+"""Multi-source job application assistant, including LinkedIn Easy Apply.
 
-Son 24 saatteki AI ilanlarını tarar, config.yaml'daki filtrelere uyanlara
-Easy Apply ile başvurur. Başvurulan ilanlar data/applied.json'da tutulur,
-böylece aynı ilana iki kez başvurulmaz.
+Filters job postings using config.yaml and records application history in
+data/applied.json to prevent blind retries. Browser sessions are stored in
+.browser-profile; sign in manually in Chrome when required.
 
-Oturum .browser-profile/ içinde saklanır; ilk çalıştırmada açılan Chrome
-penceresinde LinkedIn'e bir kez giriş yapılır.
+The terminal collects the CV path, salary expectations, English level and notice
+period. Optional CV analysis uses free OpenRouter models; the user reviews the
+extracted profile before it is used. Preferences live in data/user_settings.json.
 
-Başlarken terminalden CV dosyasını, maaş beklentisini, İngilizce seviyesini ve
-ihbar süresini sorar (Enter = önceki cevap). CV Claude API ile okunur; çıkan
-pozisyonlar ve bilgiler kullanıcı onayından sonra arama ve formlarda kullanılır.
-Cevaplar data/user_settings.json'da saklanır. Sadece Kolay Başvuru (Easy Apply) ilanlarına başvurur.
-
-Ortam değişkenleri:
-  DRY_RUN   "true" ise formları doldurur ama son adımda göndermez
-  HEADLESS  "true" ise pencere açmadan çalışır
+Environment variables:
+  DRY_RUN   "true" fills forms without intentionally sending applications
+  HEADLESS  "true" runs without a visible browser window
 """
 import csv
 import datetime as dt
@@ -40,8 +36,8 @@ import job_metadata
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
 
-ROOT = Path(__file__).resolve().parent  # kod ve varsayılan config.yaml
-# Kullanıcı verisi: kaynak koddan çalışırken proje klasörü, indirilen uygulamada ~/AutoApply
+ROOT = Path(__file__).resolve().parent  # Source code and bundled default config.yaml.
+# User data: project directory from source, ~/AutoApply in the packaged app.
 HOME = Path(os.getenv("AUTOAPPLY_HOME") or (Path.home() / "AutoApply" if getattr(sys, "frozen", False) else ROOT))
 (HOME / "data").mkdir(parents=True, exist_ok=True)
 CFG = llm_config.load_yaml(((HOME if (HOME / "config.yaml").exists() else ROOT) / "config.yaml").read_text(encoding="utf-8"))
@@ -53,18 +49,18 @@ SHOTS = HOME / "screenshots"
 PROFILE_DIR = HOME / ".browser-profile"
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEADLINE = time.time() + CFG["limits"]["max_runtime_minutes"] * 60
-STOP = threading.Event()  # arayüzdeki "Durdur" butonu
+STOP = threading.Event()  # Set by the GUI Stop button.
 PROFILE = CFG["profile"]
 EXTERNAL = CFG.get("external", {}).get("enabled", False)
 SETTINGS_FILE = HOME / "data" / "user_settings.json"
 SETTINGS: dict = {}
 
-# İngilizce seviyesi -> formlardaki seçeneklerde sırayla denenecek cevaplar
+# English level -> candidate form answers, in preference order.
 ENGLISH_LEVELS = {
-    "1": ("Native / iki dilli", ["Native or bilingual", "Native", "Bilingual", "Fluent", "C2"]),
-    "2": ("Akıcı / profesyonel", ["Full professional", "Professional working", "Fluent", "Advanced", "C1"]),
-    "3": ("Orta / konuşma", ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany"]),
-    "4": ("Temel", ["Elementary", "Basic", "Beginner", "A2"]),
+    "1": ("Native / bilingual", ["Native or bilingual", "Native", "Bilingual", "Fluent", "C2"]),
+    "2": ("Fluent / professional", ["Full professional", "Professional working", "Fluent", "Advanced", "C1"]),
+    "3": ("Conversational / intermediate", ["Conversational", "Intermediate", "Limited working", "B2", "Komunikatywny", "Średnio zaawansowany"]),
+    "4": ("Basic", ["Elementary", "Basic", "Beginner", "A2"]),
 }
 
 EASY_APPLY_RE = re.compile(r"easy apply|kolay başvuru", re.I)
@@ -93,7 +89,7 @@ QUESTION_JS = r"""el => {
   }
   const fs = el.closest('fieldset');
   if (fs) { const lg = fs.querySelector('legend'); if (lg && t(lg.innerText)) return t(lg.innerText); }
-  // Yeni LinkedIn formu: soru metni alana bağlı değil; yukarı çıkıp ilk anlamlı satırı al.
+  // New LinkedIn form: climb to the first meaningful line if the question is unbound.
   const noise = /^(\d+\s*\/\s*\d+.*|.*karakter|.*characters?|geçersiz giriş|invalid.*|.*zorunlu.*|.*required.*|yes|no|evet|hayır)$/i;
   const group = el.type === 'radio' && el.name
     ? [...document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`)] : [el];
@@ -108,7 +104,7 @@ QUESTION_JS = r"""el => {
 }"""
 
 
-# Bu durumlarla kaydedilen ilanlar sonraki çalıştırmada tekrar denenir
+# Only these explicit pre-submission statuses may be retried on a later run.
 RETRYABLE_STATUSES = frozenset({"modal_not_opened", "blocked", "skipped_no_button", "skipped_no_form",
                                "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error",
                                "skipped_run_limit", "skipped_source_limit"})
@@ -122,15 +118,15 @@ def can_retry(status: str) -> bool:
 
 
 class LimitReached(Exception):
-    """Başvuru limiti veya süre doldu."""
+    """The application limit or runtime limit has been reached."""
 
 
 class Stopped(BaseException):
-    """Kullanıcı durdurdu (BaseException: kaynaklardaki 'except Exception' bloklarında yutulmasın)."""
+    """User cancellation; BaseException keeps source-level Exception handlers from swallowing it."""
 
 
 class BrowserClosed(Stopped):
-    """Kullanıcı Chrome penceresini kapattı."""
+    """The user closed the browser."""
 
 
 def browser_closed(e: BaseException) -> bool:
@@ -138,7 +134,7 @@ def browser_closed(e: BaseException) -> bool:
 
 
 class SessionLost(Exception):
-    """LinkedIn oturumu sonlandırdı (çerez geçersiz)."""
+    """The LinkedIn session expired or its cookies are no longer valid."""
 
 
 ATTEMPTS = {'total': 0, 'by_source': {}}
@@ -206,7 +202,7 @@ def preview_application(job_id: str) -> str:
     return reserve_submission_attempt(source_for_job(job_id)) or 'dry_run'
 
 
-LOG_LINES: list[str] = []  # arayüz buradan okur
+LOG_LINES: list[str] = []  # Read by the GUI log endpoint.
 
 
 def log(msg: str) -> None:
@@ -220,7 +216,7 @@ def log(msg: str) -> None:
     try:
         print(line, flush=True)
     except Exception:
-        pass  # pencereli uygulamada konsol yok
+        pass  # Windowed builds may not have a console.
 
 
 def pause(a: float = 1.5, b: float = 3.5) -> None:
@@ -268,7 +264,7 @@ def write_applied(applied: dict) -> None:
 
 
 def job_key(title: str, company: str) -> str:
-    """Aynı ilan farklı sitelerde çıkınca tanımak için şirket+başlık anahtarı."""
+    """Company/title key for recognizing the same job across sources."""
     return re.sub(r"\W+", "", f"{company}|{title}".lower())
 
 
@@ -303,19 +299,19 @@ def blocked(page: Page) -> bool:
 
 
 def wait_human(page: Page, check, what: str, minutes: int = 5) -> bool:
-    """check(page) True olana kadar kullanıcının pencerede doğrulama/giriş yapmasını bekler."""
+    """Wait for the user to complete verification/login until check(page) succeeds."""
     if check(page):
         return True
     if os.getenv("HEADLESS", "false").lower() == "true":
         return False
-    log(f"  !! Açık Chrome penceresinde {what} (en fazla {minutes} dk bekleniyor)...")
+    log(f"  !! Please {what} in the open Chrome window (waiting up to {minutes} minutes)...")
     end = time.time() + minutes * 60
     while time.time() < end:
         pause(3, 3)
         if check(page):
             pause(2, 3)
             return True
-    log(f"  !! {what} yapılmadı, bu kaynak atlanıyor.")
+    log(f"  !! Required action not completed: {what}; skipping this source.")
     return False
 
 
@@ -330,7 +326,7 @@ def screenshot(page: Page, name: str) -> None:
 # ---------------------------------------------------------------- answers
 
 def answer(question: str, numeric: bool = False) -> list[str]:
-    """Soruya verilecek aday cevaplar (ilk eşleşen kural)."""
+    """Candidate answers to a question; the first matching rule wins."""
     q = question.lower()
     result: list[str] = []
     # Exact, user-confirmed answers take precedence over generic regex rules.
@@ -376,7 +372,7 @@ RATES: dict[str, float] = {}
 
 
 def rates() -> dict[str, float]:
-    """1 USD = ? birim. Ücretsiz kaynaklar; ulaşılamazsa boş (dönüşüm yapılmaz)."""
+    """Units per USD from free sources; an empty result prevents conversion."""
     if not RATES:
         import urllib.request
         from cv_profile import SSL_CTX
@@ -474,7 +470,7 @@ def decimal_text(value: Decimal) -> str:
 
 
 def placeholder(a: str) -> str:
-    """"__SALARY__" gibi yer tutucuları başlangıç cevaplarından / profilden doldurur."""
+    """Resolve placeholders such as __SALARY__ from settings or the profile."""
     m = re.fullmatch(r"__([A-Z_]+)__", a)
     if not m:
         return a
@@ -503,7 +499,7 @@ def year_range(option: str) -> tuple[float, float] | None:
 
 
 def choose_years(years: float, opts: list[tuple[int, str]]) -> int | None:
-    """Yalnızca doğrulanmış yıl sayısını içeren bir aralık seç; en yakınını tahmin etme."""
+    """Choose only a range containing the confirmed years; never guess the nearest."""
     ranges = [(i, year_range(o)) for i, o in opts]
     ranges = [(i, r) for i, r in ranges if r]
     if len(ranges) < max(2, len(opts) // 2):
@@ -534,7 +530,7 @@ def match_option(candidates: list[str], options: list[str]) -> int | None:
 
 
 def choose_option(question: str, options: list[str]) -> int | None:
-    """Seçenekler arasından cevabın index'ini döndür."""
+    """Return the index of an unambiguous matching answer."""
     opts = [(i, o.strip()) for i, o in enumerate(options) if o.strip() and not PLACEHOLDER_RE.search(o)]
     if not opts:
         return None
@@ -616,7 +612,7 @@ RADIO_GROUP_JS = r"""fs => {
     : [...fs.querySelectorAll('input[type=radio]')].map(r => {
         const l = r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`);
         if (l && t(l.innerText)) return t(l.innerText);
-        // Etiket boşsa metni olan en yakın üst öğe (seçenek satırı)
+        // If the label is empty, use the nearest ancestor with option text.
         let p = r.parentElement;
         while (p && p !== fs && !t(p.innerText)) p = p.parentElement;
         return p && p !== fs ? t(p.innerText) : '';
@@ -663,8 +659,8 @@ def radio_choice_confirmed(states, index) -> bool:
 
 
 def fill_radios(scope: Locator) -> list[str]:
-    """Radyo butonlu sorular; cevaplanamayanları döndürür. Yeni LinkedIn formunda
-    seçenekler div[role=radio] ve <label> boş; eski formda <legend> + <label for>."""
+    """Fill radio questions and return unresolved ones. New LinkedIn forms use
+    div[role=radio] with empty labels; older forms use legend and label[for]."""
     unanswered: list[str] = []
     # Preselected options also need a confirmed matching answer.
     for fs in scope.locator(RADIO_GROUPS).all():
@@ -673,7 +669,7 @@ def fill_radios(scope: Locator) -> list[str]:
             q, labels = fs.evaluate(RADIO_GROUP_JS)
             idx = choose_option(q, labels) if q.strip() else None
             if idx is None:
-                log(f"    ? cevapsız soru: {q[:90]}")
+                log(f"    ? unanswered question: {q[:90]}")
                 unanswered.append(q or "radio group")
                 continue
             before = fs.evaluate(RADIO_SELECTION_JS)
@@ -707,17 +703,17 @@ def fill_radios(scope: Locator) -> list[str]:
             current_q, current_labels = fs.evaluate(RADIO_GROUP_JS)
             after = fs.evaluate(RADIO_SELECTION_JS)
             if current_q != q or current_labels != labels or len(after) != len(labels) or not radio_choice_confirmed(after, idx):
-                log(f"    ? radio seçimi doğrulanamadı: {q[:90]}")
+                log(f"    ? radio selection could not be verified: {q[:90]}")
                 unanswered.append(q)
         except Exception as e:
             if browser_closed(e):
                 raise BrowserClosed() from None
-            log(f"    ! radio doldurulamadı: {e.__class__.__name__}")
+            log(f"    ! could not fill radio group: {e.__class__.__name__}")
             unanswered.append(q or question_of(fs) or "radio group")
     return unanswered
 
 
-# Dış sitelerdeki standart alanlar: (soru/name/id regex'i, profile anahtarı). İlk eşleşen kazanır.
+# Standard external fields: (question/name/id pattern, profile key); first match wins.
 STANDARD_FIELDS = [
     (r"first.?name|given.?name|vorname|\bad[ıi]?\b(?!.*soyad)", "first_name"),
     (r"last.?name|surname|family.?name|soyad|nachname", "last_name"),
@@ -734,7 +730,7 @@ STANDARD_FIELDS = [
 
 
 def fill_combobox(page: Page, el: Locator, q: str) -> bool:
-    """Greenhouse/Ashby'deki aranabilir açılır listeler (role=combobox)."""
+    """Fill searchable Greenhouse/Ashby dropdowns (role=combobox)."""
     std = standard_answer(el, q)
     cands = [std] if std else answer(q)
     if not cands:
@@ -760,12 +756,12 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
     except Exception as e:
         if browser_closed(e):
             raise BrowserClosed() from None
-        log(f"    ! liste doldurulamadı: {e.__class__.__name__}")
+        log(f"    ! could not fill dropdown: {e.__class__.__name__}")
         return False
 
 
 YESNO_JS = r"""root => {
-  // Yes/No düğme çiftleri (Ashby). Her çift için [soru, seçili mi] döndürür; düğmeleri işaretler.
+  // Mark Ashby Yes/No button pairs and return [question, any semantic selection].
   const t = s => (s || '').replace(/\s+/g, ' ').trim();
   const out = [];
   const yes = [...root.querySelectorAll('button')].filter(b => /^(yes|evet)$/i.test(t(b.innerText)));
@@ -994,7 +990,7 @@ def fill_checkgroups(scope: Locator) -> list[str]:
 
 
 def standard_answer(el: Locator, q: str) -> str | None:
-    """Dış sitelerdeki ad/e-posta/telefon gibi standart alanlar."""
+    """Resolve standard external fields such as name, email and phone."""
     if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
         return None
     key = " ".join([q, el.get_attribute("name") or "", el.get_attribute("id") or "",
@@ -1052,7 +1048,7 @@ def unconfirmed_text_questions(scope: Locator, *, external: bool) -> list[str]:
 def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     """Fill empty fields and verify answers; nonempty text is not confirmation."""
     unanswered: list[str] = []
-    # Metin alanları
+    # Text fields.
     fields = modal.locator(TEXT_FIELDS)
     for el in fields.all():
         try:
@@ -1070,7 +1066,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     unanswered.append(q)
                 continue
             if not cands:
-                log(f"    ? cevapsız soru: {q[:90]}")
+                log(f"    ? unanswered question: {q[:90]}")
                 unanswered.append(q)
                 continue
             el.fill(cands[0])
@@ -1092,10 +1088,10 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                 q = question_of(el)[:70]
             except Exception:
                 q = "?"
-            log(f"    ! alan doldurulamadı, atlandı ({e.__class__.__name__}): {q}")
+            log(f"    ! field could not be filled ({e.__class__.__name__}): {q}")
             unanswered.append(q or "text field")
 
-    # Açılır listeler
+    # Native dropdowns.
     for sel in modal.locator("select:visible").all():
         try:
             options = sel.locator("option").all_inner_texts()
@@ -1105,7 +1101,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             else:
                 unanswered.append(question_of(sel) or "select")
         except Exception as e:
-            log(f"    ! select doldurulamadı: {e.__class__.__name__}")
+            log(f"    ! could not fill select: {e.__class__.__name__}")
             unanswered.append(question_of(sel) or "select")
 
     unanswered += fill_radios(modal)
@@ -1130,7 +1126,7 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     resume = HOME / PROFILE["resume_file"]
     if external:
         unanswered += fill_yesno(modal)
-        # Dış sitelerde CV her zaman yüklenir; ön yazı dosyası alanları atlanır
+        # Upload the CV on external forms; skip cover-letter file inputs.
         for fi in modal.locator("input[type='file']").all():
             key = (question_of(fi) + " " + (fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")).lower()
             if re.search(r"cover", key) or not resume.exists():
@@ -1140,11 +1136,11 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     fi.set_input_files(str(resume))
                     pause(2, 3)
                 except Exception as e:
-                    log(f"    ! CV yüklenemedi: {e.__class__.__name__}")
+                    log(f"    ! could not upload CV: {e.__class__.__name__}")
                     unanswered.append("resume upload")
         return unanswered
 
-    # CV: başta seçilen dosya LinkedIn'de listede yoksa yükle (yüklenen otomatik seçilir)
+    # Upload the selected CV if it is not listed on LinkedIn (uploads are auto-selected).
     if resume.exists() and modal.locator("input[type='file']").count():
         if resume.name.lower() not in modal.inner_text().lower():
             try:
@@ -1323,7 +1319,7 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
     modal = page.locator(MODAL).first
     try:
         modal.wait_for(timeout=10000)
-        modal.locator("footer button").first.wait_for(timeout=20000)  # form yüklenirken spinner döner
+        modal.locator("footer button").first.wait_for(timeout=20000)  # Wait for the form-loading spinner.
     except PWTimeout:
         screenshot(page, f"{job_id}_notloaded")
         discard(page)
@@ -1372,7 +1368,7 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
             return "manual_review"
         pause(1.5, 3)
         if has_errors(modal) or modal.inner_text() == before:
-            unanswered = fill_step(page, modal)  # bir kez daha dene
+            unanswered = fill_step(page, modal)  # Retry filling once.
             if require_manual_review(page, modal, unanswered, job_id, title, company):
                 discard(page)
                 return "manual_review"
@@ -1397,7 +1393,7 @@ def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", ap
     return "skipped_too_many_steps"
 
 
-# ---------------------------------------------------------------- external (şirket sitesi)
+# ---------------------------------------------------------------- external (company sites)
 
 ATS = {
     "greenhouse": frozenset({"boards.greenhouse.io", "boards.eu.greenhouse.io",
@@ -1532,13 +1528,13 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
 
 
 def external_url(page: Page) -> str | None:
-    """LinkedIn'deki 'Başvur' butonuna basıp şirket sitesinin adresini döndürür."""
+    """Follow LinkedIn's external Apply action and return the company-site URL."""
     btn = page.get_by_role("button", name=APPLY_BTN_RE).or_(page.get_by_role("link", name=APPLY_BTN_RE))
     return follow_apply(page, btn.filter(has_not_text=EASY_APPLY_RE).first)
 
 
 def follow_apply(page: Page, btn: Locator) -> str | None:
-    """Başvur butonuna basar; açılan sekmenin ya da gidilen sayfanın adresini döndürür."""
+    """Click Apply and return the destination URL from navigation or a new tab."""
     if not btn.count():
         return None
     ctx = page.context
@@ -1563,7 +1559,7 @@ def follow_apply(page: Page, btn: Locator) -> str | None:
             url = new.url
             new.close()
             return url
-        # "Profilini paylaş / Devam et" ara penceresi
+        # Intermediate "Share your profile / Continue" dialog.
         cont = page.locator(MODAL).get_by_role("button", name=re.compile(r"continue|devam", re.I))
         if cont.count():
             try:
@@ -1574,12 +1570,12 @@ def follow_apply(page: Page, btn: Locator) -> str | None:
 
 
 def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
-    """Başvuru formunun doğrudan adresi ve ATS adı. Şirket sitesine gömülü formları da bulur."""
+    """Find a direct application URL/provider, including embedded company-site forms."""
     name = ats_provider(url)
     if not name:
         if not safe_https_url(url):
             return None, "unknown"
-        # Şirket sitesine gömülü Greenhouse/Ashby/Lever iframe'i
+        # Discover an approved Greenhouse/Ashby/Lever iframe on the company site.
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             pause(3, 4)
@@ -1619,7 +1615,7 @@ def apply_external(page: Page, job_id: str, title: str, company: str, applied: d
 
 
 def apply_form(page: Page, job_id: str, title: str, company: str, url: str, applied: dict | None = None) -> str:
-    """Şirket sitesindeki başvuru formu. Spam sayılmamak için çalıştırma başına sınırlı ve aralıklı."""
+    """Process a company-site form with a per-run quota and inter-attempt cooldown."""
     ext = CFG["external"]
     if not EXTERNAL:
         record_manual(job_id, title, company, url, "external_disabled")
@@ -1628,14 +1624,14 @@ def apply_form(page: Page, job_id: str, title: str, company: str, url: str, appl
     if denied:
         return denied
     if EXT_STATE["count"] >= ext.get("max_per_run", 5):
-        return "skipped_external_limit"  # sonraki çalıştırmada tekrar denenir
+        return "skipped_external_limit"  # May be retried on the next run.
     form_url, ats = ats_apply_url(page, url)
     if not form_url:
         record_manual(job_id, title, company, url, "unsupported_site")
         return "external_manual"
     wait = EXT_STATE["last"] + ext.get("min_wait_seconds", 120) - time.time()
     if wait > 0:
-        log(f"  .. şirket formu öncesi {int(wait)} sn bekleniyor")
+        log(f"  .. waiting {int(wait)} seconds before the next company form")
         pause(wait, wait)
     EXT_STATE["count"] += 1
     EXT_STATE["last"] = time.time()
@@ -1666,7 +1662,7 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
     unanswered = fill_step(page, form, external=True)
     pause(1, 2)
     check_ats_form(page, document, form, ats)
-    unanswered += fill_step(page, form, external=True)  # açılan koşullu sorular için ikinci tur
+    unanswered += fill_step(page, form, external=True)  # Second pass for conditional questions.
     check_ats_form(page, document, form, ats)
     if require_manual_review(page, form, unanswered, job_id, title, company, form_url, external=True):
         return "manual_review"
@@ -1701,7 +1697,7 @@ def search_url(keyword: str, location: str) -> str:
         "sortBy": "DD",
     }
     if not EXTERNAL:
-        params["f_AL"] = "true"  # sadece Easy Apply
+        params["f_AL"] = "true"  # Easy Apply only.
     if s.get("remote_only"):
         params["f_WT"] = "2"
     if s.get("experience_levels"):
@@ -1729,22 +1725,22 @@ def open_list(page: Page, url: str) -> list[str] | None:
             raise SessionLost() from None
         if browser_closed(e):
             raise BrowserClosed() from None
-        log(f"  ! sayfa açılamadı: {str(e)[:100]}")
+        log(f"  ! could not open page: {str(e)[:100]}")
         return None
     pause(3, 5)
     return list(dict.fromkeys(f for f in page.evaluate(SCRAPE_IDS_JS) if f and f.isdigit()))
 
 
 def job_lists(page: Page):
-    """Sırayla ilan listeleri üretir: önce İş İlanları sekmesi ve önerilenler, sonra aramalar."""
+    """Yield job lists: the Jobs tab, recommendations, then configured searches."""
     found = open_list(page, "https://www.linkedin.com/jobs/") or []
-    log(f"  İş İlanları sekmesi: {len(found)} ilan")
+    log(f"  Jobs tab: {len(found)} jobs")
     yield found
     for p in range(CFG["search"]["pages_per_search"]):
         found = open_list(page, f"https://www.linkedin.com/jobs/collections/recommended/?start={p * 24}")
         if not found:
             break
-        log(f"  Önerilen ilanlar s{p + 1}: {len(found)} ilan")
+        log(f"  Recommended jobs, page {p + 1}: {len(found)} jobs")
         yield found
     for kw in CFG["search"]["keywords"]:
         for loc in CFG["search"]["locations"]:
@@ -1752,7 +1748,7 @@ def job_lists(page: Page):
                 found = open_list(page, search_url(kw, loc) + f"&start={p * 25}")
                 if found is None:
                     break
-                log(f"  '{kw}' @ {loc} s{p + 1}: {len(found)} ilan")
+                log(f"  '{kw}' @ {loc}, page {p + 1}: {len(found)} jobs")
                 yield found
                 if len(found) < 25:
                     break
@@ -1777,7 +1773,7 @@ DESC_JS = """() => {
 
 
 def job_info(page: Page) -> tuple[str, str, str]:
-    """Başlık, şirket, açıklama. Sekme başlığı 'Pozisyon | Şirket | LinkedIn' biçiminde."""
+    """Return title, company and description; tabs use 'Title | Company | LinkedIn'."""
     parts = [p.strip() for p in page.title().split("|")]
     title = parts[0] if len(parts) >= 3 else first_text(page, [".job-details-jobs-unified-top-card__job-title", "h1"])
     company = parts[1] if len(parts) >= 3 else first_text(page, ["a[href*='/company/']"])
@@ -1785,7 +1781,7 @@ def job_info(page: Page) -> tuple[str, str, str]:
 
 
 def job_ok(title: str, company: str, description: str) -> str | None:
-    """Uygunsa None, değilse sebebini döndür."""
+    """Return None for an eligible job, otherwise the rejection reason."""
     f = CFG["filters"]
     t, d = title.lower(), description.lower()
     if not any(re.search(p, t) for p in f["title_include"]):
@@ -1831,14 +1827,14 @@ def check_job_eligibility(job: dict, applied: dict) -> bool:
         return True
     unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown")
     status = "metadata_manual" if unknown else reason
-    log(f"- atla [{reason}] {job['title']} @ {job['company']}")
+    log(f"- skip [{reason}] {job['title']} @ {job['company']}")
     if unknown:
         record_manual(job["id"], job["title"], job["company"], job["url"], reason)
     record(applied, job["id"], job["title"], job["company"], status, job["url"])
     return False
 
 
-# ---------------------------------------------------------------- başlangıç soruları
+# ---------------------------------------------------------------- startup questions
 
 def ask(prompt: str, default: str) -> str:
     raw = input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
@@ -1846,35 +1842,35 @@ def ask(prompt: str, default: str) -> str:
 
 
 def ask_settings() -> None:
-    """CV, maaş ve İngilizce bilgisini kullanıcıdan alır; cevaplar bir sonraki sefere varsayılan olur."""
+    """Collect CV, salary and English settings; reuse them as defaults next time."""
     load_settings()
     if not sys.stdin.isatty():
-        log("Terminal yok, kayıtlı ayarlar kullanılıyor.")
+        log("No interactive terminal; using saved settings.")
     else:
-        print("\n=== Başvuru bilgileri (Enter = köşeli parantezdeki değer) ===")
+        print("\n=== Application details (Enter keeps the value in brackets) ===")
         while True:
-            raw = ask("CV dosyası (PDF/DOCX yolu, dosyayı terminale sürükleyebilirsin)", SETTINGS["resume"])
+            raw = ask("CV file (PDF/DOCX path; you can drag the file into this terminal)", SETTINGS["resume"])
             path = Path(raw.strip("'\" ").replace("\\ ", " ")).expanduser()
             path = path if path.is_absolute() else HOME / path
             if path.is_file() and path.suffix.lower() in (".pdf", ".doc", ".docx"):
                 SETTINGS["resume"] = str(path)
                 break
-            print(f"  ! Dosya bulunamadı veya PDF/DOCX değil: {path}")
-        while (cur := ask("Maaş para birimi (USD/EUR/GBP/TRY)", SETTINGS.get("currency", "USD")).upper()) not in CURRENCY_RE:
+            print(f"  ! File not found or not a PDF/DOCX: {path}")
+        while (cur := ask("Salary currency (USD/EUR/GBP/TRY)", SETTINGS.get("currency", "USD")).upper()) not in CURRENCY_RE:
             pass
         SETTINGS["currency"] = cur
         while True:
-            salary = re.sub(r"[^\d]", "", ask(f"Yıllık maaş beklentisi ({cur}, sadece sayı)", SETTINGS["salary"]))
+            salary = re.sub(r"[^\d]", "", ask(f"Annual salary expectation ({cur}, digits only)", SETTINGS["salary"]))
             if salary:
                 SETTINGS["salary"] = salary
                 break
-        print("İngilizce seviyesi:")
+        print("English level:")
         for key, (label, _) in ENGLISH_LEVELS.items():
             print(f"  {key}) {label}")
-        while (eng := ask("Seçim", SETTINGS["english"])) not in ENGLISH_LEVELS:
+        while (eng := ask("Choose a level", SETTINGS["english"])) not in ENGLISH_LEVELS:
             pass
         SETTINGS["english"] = eng
-        SETTINGS["notice"] = re.sub(r"[^\d]", "", ask("İhbar süresi (gün)", SETTINGS["notice"])) or SETTINGS["notice"]
+        SETTINGS["notice"] = re.sub(r"[^\d]", "", ask("Notice period (days)", SETTINGS["notice"])) or SETTINGS["notice"]
         cv_setup()
         print()
     finalize_settings()
@@ -1888,7 +1884,7 @@ def load_settings() -> dict:
 
 
 def finalize_settings() -> None:
-    """Cevapları kaydeder ve profile/aramaya uygular (terminal ve arayüz ortak)."""
+    """Save and apply profile/search settings for both terminal and GUI workflows."""
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
@@ -1897,15 +1893,15 @@ def finalize_settings() -> None:
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
-    log(f"CV: {Path(SETTINGS['resume']).name} | maaş: {', '.join(f'{v} {c}' for c, v in (SETTINGS.get('monthly_salary_by_currency') or {}).items()) + ' /ay' if SETTINGS.get('monthly_salary_by_currency') else SETTINGS['salary'] + ' /yıl'} | "
-        f"İngilizce: {ENGLISH_LEVELS[SETTINGS['english']][0]} | ihbar: {SETTINGS['notice']} gün")
+    log(f"CV: {Path(SETTINGS['resume']).name} | salary: {', '.join(f'{v} {c}' for c, v in (SETTINGS.get('monthly_salary_by_currency') or {}).items()) + ' /month' if SETTINGS.get('monthly_salary_by_currency') else SETTINGS['salary'] + ' /year'} | "
+        f"English: {ENGLISH_LEVELS[SETTINGS['english']][0]} | notice: {SETTINGS['notice']} days")
 
 
 def api_key() -> str:
     key = find_key()
     if key:
         return key
-    key = input("Ücretsiz OpenRouter anahtarı (openrouter.ai/settings/keys; sadece ücretsiz modeller kullanılır, ücret ödemezsin; boş = atla): ").strip()
+    key = input("OpenRouter API key (openrouter.ai/settings/keys; free models only, no paid requests; leave blank to skip): ").strip()
     if key:
         save_key(key)
     return key
@@ -1926,21 +1922,21 @@ def find_key(provider: str = 'openrouter') -> str:
 
 
 def show_profile(prof: dict, locations: list[str]) -> None:
-    print("\n=== CV'den çıkarılan profil ===")
-    print(f"Ad: {prof['first_name']} {prof['last_name']} | {prof['email']} | {prof['phone_intl']}")
-    print(f"Şehir: {prof['city']} | LinkedIn: {prof['linkedin'] or '-'} | GitHub: {prof['github'] or '-'}")
-    print(f"Ünvan: {prof['current_title']} | Toplam deneyim: {prof['total_years']} yıl")
-    print("Aranacak pozisyonlar:")
+    print("\n=== Profile extracted from your CV ===")
+    print(f"Name: {prof['first_name']} {prof['last_name']} | {prof['email']} | {prof['phone_intl']}")
+    print(f"City: {prof['city']} | LinkedIn: {prof['linkedin'] or '-'} | GitHub: {prof['github'] or '-'}")
+    print(f"Current title: {prof['current_title']} | Total experience: {prof['total_years']} years")
+    print("Job titles to search:")
     for t in prof["job_titles"]:
         print(f"  - {t}")
-    print("Başlıkta aranacak kelimeler: " + ", ".join(prof["title_keywords"]))
-    print("Yetenek yılları: " + ", ".join(f"{x['skill']} {x['years']}y" for x in prof["skills"]))
-    print("Ülkeler: " + ", ".join(locations))
-    print(f"Ön yazı: {prof['cover_letter']}")
+    print("Title keywords: " + ", ".join(prof["title_keywords"]))
+    print("Skill experience: " + ", ".join(f"{x['skill']} {x['years']} years" for x in prof["skills"]))
+    print("Countries / regions: " + ", ".join(locations))
+    print(f"Cover letter: {prof['cover_letter']}")
 
 
 def cv_setup() -> None:
-    """CV'den profil çıkarır (aynı CV için önbellekten) ve kullanıcıya onaylatır."""
+    """Extract or reuse a matching CV profile and ask the user to review it."""
     import cv_profile
     resume = Path(SETTINGS["resume"])
     digest = hashlib.sha256(resume.read_bytes()).hexdigest()
@@ -1954,28 +1950,28 @@ def cv_setup() -> None:
         if not key:
             SETTINGS.pop("cv_profile", None)
             return
-        print("CV analiz ediliyor...")
+        print("Analyzing CV...")
         try:
             prof = cv_profile.extract(resume, key, log=print, max_output_tokens=config.max_output_tokens,
                                       timeout_seconds=config.timeout_seconds)
             cv_profile.validate(prof)
         except Exception as e:
-            print(f"  ! CV analiz edilemedi ({e.__class__.__name__}: {str(e)[:150]}); config.yaml kullanılacak.")
+            print(f"  ! Could not analyze CV ({e.__class__.__name__}: {str(e)[:150]}); using config.yaml.")
             SETTINGS.pop("cv_profile", None)
             return
     locations = SETTINGS.get("locations") or CFG["search"]["locations"]
     while True:
         show_profile(prof, locations)
-        choice = ask("Onaylıyor musun? e=evet, p=pozisyonları değiştir, u=ülkeleri değiştir, h=CV profilini kullanma", "e").lower()
-        if choice == "e":
+        choice = ask("Use this profile? y=yes, t=edit job titles, l=edit locations, n=do not use the CV profile", "y").lower()
+        if choice == "y":
             cv_profile.validate(prof)
             SETTINGS.update(cv_profile=prof, cv_hash=digest, locations=locations)
             return
-        if choice == "h":
+        if choice == "n":
             SETTINGS.pop("cv_profile", None)
             return
-        if choice == "p":
-            raw = input("Pozisyonlar (virgülle ayır): ")
+        if choice == "t":
+            raw = input("Job titles (comma-separated): ")
             candidate = dict(prof)
             candidate["job_titles"] = [t.strip() for t in raw.split(",") if t.strip()] or prof["job_titles"]
             words = {w.lower() for t in candidate["job_titles"] for w in re.findall(r"[\w+#]{3,}", t)}
@@ -1985,18 +1981,18 @@ def cv_setup() -> None:
                 prof = candidate
             except cv_profile.ProfileValidationError as e:
                 print(f"  ! {e}")
-        if choice == "u":
-            raw = input("Ülkeler/bölgeler (virgülle ayır, ör. European Union, Türkiye): ")
+        if choice == "l":
+            raw = input("Countries / regions (comma-separated, e.g. European Union, United Kingdom): ")
             locations = [t.strip() for t in raw.split(",") if t.strip()] or locations
 
 
 def apply_cv_profile(prof: dict) -> None:
-    """Onaylanan CV profilini arama ayarlarına, filtrelere ve form cevaplarına uygular."""
+    """Apply the reviewed CV profile to search settings, filters and form answers."""
     from cv_profile import validate
     validate(prof)
     for k in ("first_name", "last_name", "email", "phone_intl", "city", "country", "current_title", "cover_letter"):
         PROFILE[k] = prof[k]  # Empty validated fields must not retain another CV's answers.
-    # Linkler CV'de yoksa config'deki başkasının linki kullanılmasın
+    # Missing CV links must not reuse links from another profile in the config.
     PROFILE.update(linkedin=prof["linkedin"], github=prof["github"], current_company="")
     for k in ("linkedin", "github"):
         if PROFILE[k] and not PROFILE[k].startswith("http"):
@@ -2004,7 +2000,7 @@ def apply_cv_profile(prof: dict) -> None:
     PROFILE["full_name"] = f"{PROFILE['first_name']} {PROFILE['last_name']}".strip()
     PROFILE.update(phone="", country_code="")
     if prof.get("phone_intl"):
-        # Ülke kodu ayrı sorulduğu için yerel numara: "+90 534 ..." -> "534..."
+        # Derive the local number when country code is a separate field: "+90 534 ..." -> "534...".
         PROFILE["phone"] = re.sub(r"\D", "", re.sub(r"^\+\d{1,3}[\s-]", "", prof["phone_intl"]))
         code = re.match(r"\+(\d{1,3})[\s-]", prof["phone_intl"])
         PROFILE["country_code"] = f"(+{code.group(1)})" if code else ""
@@ -2016,7 +2012,7 @@ def apply_cv_profile(prof: dict) -> None:
     words = {w for t in prof["job_titles"] for w in re.findall(r"[\w+#]+", t.lower()) if len(w) > 1}
     words |= {w.lower() for w in prof["title_keywords"]}
     CFG["filters"]["title_include"] = ["|".join(rf"\b{re.escape(w)}\b" for w in sorted(words))]
-    # "AI Search uzmanı" gibi alakasız ilanlar elensin: başlıkta pozisyonun rol kelimesi de olmalı
+    # Require a role keyword as well to reject unrelated keyword-only job titles.
     roles = {re.findall(r"[\w+#]+", t.lower())[-1] for t in prof["job_titles"] if re.findall(r"[\w+#]+", t)}
     roles |= {"engineer", "developer", "scientist", "analyst", "architect", "researcher", "specialist", "lead"} & words
     CFG["filters"]["title_require"] = ["|".join(rf"\b{re.escape(w)}" for w in sorted(roles))] if roles else []
@@ -2028,7 +2024,7 @@ def apply_cv_profile(prof: dict) -> None:
 # ---------------------------------------------------------------- main
 
 def process_job(page: Page, applied: dict, job_id: str) -> bool:
-    """İlanı açar, uygunsa başvurur. Başvuru yapıldıysa True."""
+    """Open and process an eligible job; return True for a confirmed success or preview."""
     try:
         if submission_quota_status('linkedin'):
             return False
@@ -2037,7 +2033,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         title, company, desc = job_info(page)
         reason = job_ok(title, company, desc) or ("applied_elsewhere" if applied_elsewhere(applied, title, company) else None)
         if reason:
-            log(f"- atla [{reason}] {title} @ {company}")
+            log(f"- skip [{reason}] {title} @ {company}")
             record(applied, job_id, title, company, reason)
             return False
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
@@ -2059,7 +2055,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             raise SessionLost() from None
         if browser_closed(e):
             raise BrowserClosed() from None
-        log(f"  ! hata {job_id}: {e.__class__.__name__}: {str(e)[:150]}")
+        log(f"  ! error {job_id}: {e.__class__.__name__}: {str(e)[:150]}")
         screenshot(page, f"{job_id}_error")
         try:
             page.keyboard.press("Escape")
@@ -2072,16 +2068,16 @@ def linkedin_login(page: Page) -> bool:
     page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
     pause(2, 4)
     if re.search(r"login|checkpoint|authwall|signup|uas/", page.url) or page.url.rstrip("/") == "https://www.linkedin.com":
-        log("Giriş yok. Açılan Chrome penceresinde LinkedIn'e giriş yap (10 dk bekleniyor)...")
+        log("Not signed in. Please sign in to LinkedIn in the open Chrome window (waiting up to 10 minutes)...")
         if "login" not in page.url:
             page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
         try:
             page.wait_for_url(re.compile(r"linkedin\.com/(feed|in/|mynetwork|jobs)"), timeout=600_000)
         except PWTimeout:
-            log("LinkedIn'e giriş yapılmadı, diğer sitelere geçiliyor.")
+            log("LinkedIn login was not completed; moving to other sources.")
             return False
         pause(3, 5)
-    log("LinkedIn girişi tamam.")
+    log("LinkedIn login complete.")
     return True
 
 
@@ -2102,14 +2098,14 @@ def run_linkedin(page: Page, applied: dict, count: int) -> int:
                     if process_job(page, applied, job_id):
                         count += 1
     except LimitReached:
-        log("Günlük limit/süre doldu.")
+        log("Run application limit or runtime limit reached.")
     except SessionLost:
-        log("LinkedIn oturumu kapattı. Sonraki çalıştırmada açılan pencerede giriş yap; diğer sitelere geçiliyor.")
+        log("LinkedIn session expired. Sign in again on the next run; moving to other sources.")
     return count
 
 
 def launch(pw):
-    """Kalıcı profil: sitelere bir kez elle giriş yapılır, oturumlar burada saklanır."""
+    """Launch a persistent browser profile that retains manual site logins."""
     last = None
     for channel in ("chrome", "msedge"):
         try:
@@ -2123,11 +2119,11 @@ def launch(pw):
             )
         except Exception as e:
             last = e
-    raise RuntimeError("Google Chrome bulunamadı. https://www.google.com/chrome adresinden yükleyip tekrar dene.") from last
+    raise RuntimeError("Google Chrome could not be launched. Install it from https://www.google.com/chrome and try again.") from last
 
 
 def run_bot(*, reset_stop: bool = True) -> int:
-    """Başlangıç bilgileri (SETTINGS) hazırken başvuruları yapar."""
+    """Run the application workflow after SETTINGS have been prepared."""
     global DEADLINE
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
@@ -2136,17 +2132,17 @@ def run_bot(*, reset_stop: bool = True) -> int:
     if reset_stop:
         STOP.clear()
     if STOP.is_set():
-        log("Durduruldu (başlamadan önce).")
+        log("Stopped before the run started.")
         return 0
     applied = load_applied()
     # Quota is per run; keep 'last' so restarting does not bypass the cooldown.
     EXT_STATE["count"] = 0
     reset_submission_attempts()
-    log(f"Başlıyor ({'test modu, başvuru gönderilmez' if DRY_RUN else 'gerçek başvuru'}), daha önce işlenen ilan: {len(applied)}")
+    log(f"Starting ({'test mode; applications will not be sent' if DRY_RUN else 'LIVE mode; real applications may be sent'}); previously recorded jobs: {len(applied)}")
     count = 0
     with sync_playwright() as pw:
         ctx = launch(pw)
-        # Alan tıklama/doldurma 6 sn'de vazgeçsin (takılı kalmasın); sayfa yükleme 30 sn
+        # Limit control actions to 6 seconds and page navigation to 30 seconds.
         ctx.set_default_timeout(6000)
         ctx.set_default_navigation_timeout(30000)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -2156,16 +2152,16 @@ def run_bot(*, reset_stop: bool = True) -> int:
             import sources
             count = sources.run(sys.modules[__name__], page, applied, count)
         except BrowserClosed:
-            log("Chrome penceresi kapatıldı, durduruldu. Kalan ilanlar bir sonraki çalıştırmada denenir.")
+            log("Browser closed; stopped. Remaining jobs may be processed on the next run.")
         except Stopped:
-            log("Durduruldu.")
+            log("Stopped.")
         finally:
             try:
                 ctx.close()
             except Exception:
                 pass
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count} attempts={ATTEMPTS['total']}\n", encoding="utf-8")
-    log(f"Bitti. {'Test edilen' if DRY_RUN else 'Başvurulan'}: {count} | {'previews' if DRY_RUN else 'Submit attempts'}: {ATTEMPTS['total']}")
+    log(f"Finished. {'Tested' if DRY_RUN else 'Confirmed applications'}: {count} | {'previews' if DRY_RUN else 'Submit attempts'}: {ATTEMPTS['total']}")
     return 0
 
 

@@ -1,8 +1,8 @@
-"""Kodlama bilmeyenler için arayüz: tarayıcıda açılan yerel bir sayfa.
+"""Local browser GUI for uploading a CV, reviewing details and running the bot.
 
-Çift tıklanınca (veya `python gui.py`) bilgisayarda küçük bir sunucu başlar ve varsayılan
-tarayıcıda sayfa açılır. CV yükleme, bilgileri onaylama, başlat/durdur ve canlı kayıt buradadır.
-Sunucu sadece bu bilgisayardan (127.0.0.1) erişilebilir.
+Double-click the app or run `python gui.py` to start a local server and open the
+default browser. The GUI provides start/stop controls and a live log.
+The server binds only to this computer's loopback address (127.0.0.1).
 """
 import base64
 import copy
@@ -28,7 +28,7 @@ STATE = {"running": False, "analyzing": False}
 # A plain Lock may be released by the worker that receives the reservation.
 # It covers preparation and the whole run, not just Thread.start().
 ACTIVITY_LOCK = threading.Lock()
-REQUIRED = ["first_name", "last_name", "email", "phone_intl", "city", "country"]  # formlar bunları hep soruyor
+REQUIRED = ["first_name", "last_name", "email", "phone_intl", "city", "country"]  # Commonly required application details.
 SOURCE_NAMES = ["linkedin", "wellfound", "indeed", "remoteok", "himalayas", "weworkremotely"]
 
 
@@ -172,10 +172,10 @@ def _analyze(body: dict) -> dict:
     config = apply.current_llm_config()
     if not config.legacy_supported:
         return {'error': 'llm_not_implemented'}
-    key = re.sub(r"[\s\u200b-\u200d\ufeff]", "", body.get("key") or "")  # kopyalamada gelen boşluk/görünmez karakterler
+    key = re.sub(r"[\s\u200b-\u200d\ufeff]", "", body.get("key") or "")  # Remove pasted whitespace/invisible characters.
     if key:
         if not re.fullmatch(r"sk-or-[A-Za-z0-9_-]{20,}", key):
-            return {"error": "short_key"}  # listedeki kısaltılmış "sk-or-v1-abc...123" kopyalanmış
+            return {"error": "short_key"}  # The user may have copied the abbreviated key-list display.
         body["key"] = key
         try:
             cv_profile.request("/key", key, timeout_seconds=config.timeout_seconds)
@@ -236,7 +236,7 @@ def start(body: dict) -> dict:
                     raise RuntimeError('CV changed before the worker started; review the new CV first')
                 apply.run_bot(reset_stop=False)  # Preserve Stop received while this worker was queued.
             except BaseException as e:  # The reservation must also survive STOP/browser closure.
-                apply.log(f"HATA: {e}")
+                apply.log(f"ERROR: {e}")
             finally:
                 finish_activity("running")
 
@@ -303,7 +303,7 @@ def _prepare_start(body: dict) -> dict:
         return {"error": "invalid_settings", "detail": "settings.sources: expected known source names"}
     if not isinstance(locations, list) or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
-    # Aylık beklentiler: kendi para birimi + EUR + USD. Yıllık "salary" diğer para birimlerine çevirmenin tabanı.
+    # Monthly expectations in the user's currency, EUR and USD; annual salary is the FX base.
     cur = body.get("currency")
     if not isinstance(cur, str) or cur not in apply.CURRENCY_RE:
         return {"error": "invalid_settings", "detail": "settings.currency: unknown currency"}
@@ -379,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 PAGE = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Auto Apply</title>
+<html lang="en"><head><meta charset="utf-8"><title>Auto Apply</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --muted:#667085; --line:#e4e7ec; --accent:#2563eb; --ok:#16a34a; --warn:#b45309; }
@@ -535,7 +535,7 @@ const T = {
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
 const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);
-let lang = navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en", S = null, logFrom = 0, poll = null, uiClosed = false;
+let lang = "en", S = null, logFrom = 0, poll = null, uiClosed = false;
 try {
   const saved = localStorage.getItem("lang");
   if (validLanguage(saved)) lang = saved;
@@ -543,6 +543,7 @@ try {
 const $ = id => document.getElementById(id);
 const t = k => T[lang][k] || k;
 function render() {
+  document.documentElement.lang = lang;
   document.querySelectorAll("[data-t]").forEach(e => { if (e.id !== "cvname" || !S || !S.cv_name) e.textContent = t(e.dataset.t); });
   document.querySelectorAll(".lang button[data-l]").forEach(b => b.classList.toggle("on", b.dataset.l === lang));
   const v = $("english").value;
@@ -661,7 +662,7 @@ load();
 
 
 def selftest() -> None:
-    """Derlenen uygulamanın Chrome'u sürebildiğini doğrular (CI'da çalışır)."""
+    """Verify that the packaged app can drive Chrome (used by release CI)."""
     os.environ["HEADLESS"] = "true"
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
@@ -669,9 +670,9 @@ def selftest() -> None:
         page = ctx.new_page()
         page.set_content("<title>selftest-ok</title>")
         title = page.title()
-        # OpenRouter'a HTTPS bağlantısı (sertifikalar pakette mi): model listesi anahtarsız açılır
+        # Check bundled HTTPS certificates using OpenRouter's public model catalog.
         models = cv_profile.request("/models", "")["data"]
-        (apply.HOME / "selftest.txt").write_text(f"{title} models={len(models)}", encoding="utf-8")  # pencereli uygulamada konsol yok
+        (apply.HOME / "selftest.txt").write_text(f"{title} models={len(models)}", encoding="utf-8")  # Windowed apps may have no console.
         ctx.close()
 
 
@@ -681,7 +682,7 @@ def main() -> None:
     apply.load_settings()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"
-    apply.log(f"Arayüz: {url}")
+    apply.log(f"Interface: {url}")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

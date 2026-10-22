@@ -6,6 +6,8 @@ LinkedIn (Easy Apply) · Indeed · Wellfound · Remote OK · Himalayas · We Wor
 
 No coding needed. Free.
 
+The interface defaults to **English**, regardless of your browser language. Turkish remains an optional GUI translation; an explicitly saved language choice is remembered. Built-in logs, terminal prompts, errors and installer messages are English. Site-language recognition and your own CV/profile text are not translated.
+
 <p align="center">
   <a href="docs/autoapply-demo.mp4"><img src="docs/autoapply-demo.gif" alt="How to use Auto Apply: upload your CV, check your details and salary, start applying" width="800"></a>
   <br><sub>How it works in 40 seconds. Click for the full-quality video.</sub>
@@ -112,6 +114,8 @@ cd linkedin-auto-apply
 ./run.sh            # Mac/Linux (Windows: run.bat). Opens the same web UI.
 ./run.sh --terminal # terminal-only mode
 ```
+
+Terminal CV review uses `y` to accept, `t` to edit job titles, `l` to edit locations and `n` to decline the extracted profile. Pressing Enter accepts the displayed default.
 
 **Linux:** run `./install-linux.sh` once. It installs the Python packages and Google Chrome if missing (automatic on x86_64 Debian/Ubuntu/Fedora; may ask for your sudo password) and adds **Auto Apply** to the app menu. A desktop session is needed because the app opens a Chrome window.
 

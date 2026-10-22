@@ -9,7 +9,7 @@ __pycache__/
 build/
 dist/
 *.spec
-# kişisel veriler
+# Personal data.
 data/
 cv/
 *.pdf
