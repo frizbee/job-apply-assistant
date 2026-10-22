@@ -107,7 +107,7 @@ def state() -> dict:
         except llm_credentials.CredentialError:
             credentials[provider] = {'provider': provider, 'has_key': False, 'source': 'error'}
     return {
-        "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode")},
+        "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode", "target_technologies", "excluded_technologies")},
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
         "profile": prof,
         "profile_error": profile_error,
@@ -303,6 +303,11 @@ def _prepare_start(body: dict) -> dict:
         return {"error": "invalid_settings", "detail": "settings.sources: expected known source names"}
     if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
+    technology_settings = {field: body.get(field, s.get(field, [])) for field in apply.job_relevance.FIELDS}
+    try:
+        apply.job_relevance.validate_settings(technology_settings)
+    except ValueError as e:
+        return {'error': 'invalid_settings', 'detail': str(e)}
     # Monthly expectations in the user's currency, EUR and USD; annual salary is the FX base.
     cur = body.get("currency")
     if not isinstance(cur, str) or cur not in apply.CURRENCY_RE:
@@ -327,7 +332,8 @@ def _prepare_start(body: dict) -> dict:
     s.update(cv_profile=prof, cv_hash=digest,
              english=body["english"], notice=re.sub(r"\D", "", str(body["notice"])) or s["notice"],
               locations=list(body["locations"]),
-              sources=body["sources"], test_mode=body["test_mode"])
+               sources=body["sources"], test_mode=body["test_mode"])
+    s.update({field: [term.strip() for term in terms] for field, terms in technology_settings.items()})
     for name in SOURCE_NAMES:
         apply.CFG["sources"][name] = name in body["sources"]
     apply.DRY_RUN = s["test_mode"]
@@ -450,6 +456,9 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
     <div><label data-t="github"></label><input type="text" id="github"></div>
   </div>
   <label data-t="titles"></label><textarea id="job_titles"></textarea>
+  <label data-t="target_technologies"></label><textarea id="target_technologies" style="min-height:60px"></textarea>
+  <label data-t="excluded_technologies"></label><textarea id="excluded_technologies" style="min-height:60px"></textarea>
+  <p class="hint" data-t="technology_hint"></p>
   <label data-t="locations"></label><textarea id="locations" style="min-height:60px"></textarea>
   <div class="grid3">
     <div><label data-t="years"></label><input type="text" id="total_years"></div>
@@ -493,6 +502,7 @@ const T = {
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", city:"City, Country", country:"Country", github:"GitHub / portfolio",
   titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
+  target_technologies:"Target technologies (one per line; any one matches)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Both lists are optional and start empty. Exclusions match the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
    salary_hint:"Monthly amounts; use a decimal point, no grouping separators. Leave blank if unknown. Automatic answers require an explicit currency and period, and valid exchange rates when converting. Hourly/daily conversions use 2080 hours/220 days per year. Otherwise manual review is required.",
   step3:"Step 3", where_title:"Where to apply", where_hint:"Only remote jobs posted in the last 7 days. Company websites are limited to a few per run so you are not flagged as spam.",
@@ -517,6 +527,7 @@ const T = {
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
   titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
+  target_technologies:"Hedef teknolojiler (her satıra bir tane; biri yeterli)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"İki liste de isteğe bağlıdır ve boş başlar. Hariç tutma, isteğe bağlı becerilere değil pozisyon başlığına veya zorunlu gereksinimlere uygulanır. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
    salary_hint:"Aylık tutarlar; ondalık nokta kullan, binlik ayırıcı kullanma. Bilinmiyorsa boş bırak. Otomatik yanıt için açık para birimi/dönem ve dönüşümde geçerli kur gerekir. Saatlik/günlük dönüşüm yılda 2080 saat/220 gün kullanır. Aksi durumda manuel kontrol gerekir.",
   step3:"Adım 3", where_title:"Nereye başvurulsun", where_hint:"Sadece son 7 günde yayınlanan remote ilanlar. Şirket sitelerine her çalıştırmada az sayıda başvurulur, spam sayılmamak için.",
@@ -578,6 +589,8 @@ async function load() {
   $("currency").value = cur; $("salary").value = ms[cur] ?? (st.salary ? Math.round(st.salary / 12) : "");
   $("salary_eur").value = ms.EUR ?? ""; $("salary_usd").value = ms.USD ?? ""; $("notice").value = st.notice || "";
   $("locations").value = (st.locations || S.default_locations).join("\n");
+  $("target_technologies").value = (st.target_technologies || []).join("\n");
+  $("excluded_technologies").value = (st.excluded_technologies || []).join("\n");
   const on = st.sources || Object.keys(SOURCES);
   $("sources").innerHTML = Object.entries(SOURCES).map(([k, v]) => `<label><input type="checkbox" value="${k}" ${on.includes(k) ? "checked" : ""}> ${v}</label>`).join("");
   $("test_mode").checked = st.test_mode ?? false;
@@ -621,6 +634,7 @@ $("start").onclick = async () => {
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
   const body = { profile, cv_hash: S.cv_hash, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+    target_technologies: lines("target_technologies"), excluded_technologies: lines("excluded_technologies"),
     salary_eur: $("salary_eur").value, salary_usd: $("salary_usd").value, notice: $("notice").value, english: $("english").value,
     sources: [...document.querySelectorAll("#sources input:checked")].map(e => e.value), test_mode: $("test_mode").checked };
   document.querySelectorAll("input.missing").forEach(e => e.classList.remove("missing"));

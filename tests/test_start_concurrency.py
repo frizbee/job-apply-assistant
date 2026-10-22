@@ -2,6 +2,7 @@
 import base64
 import copy
 import hashlib
+import json
 from pathlib import Path
 from queue import Queue
 import tempfile
@@ -292,4 +293,30 @@ class StartConcurrencyTests(SafetyTest):
             self.assertEqual(gui.start(body)["error"], "invalid_settings")
             self.assert_idle()
             self.assertEqual(self.snapshot(), before)
+        self.factory.assert_not_called()
+
+    def test_technology_settings_are_saved_and_applied_without_invented_defaults(self):
+        body = self.body()
+        body.update(target_technologies=[' ArbitraryStack ', 'C++'], excluded_technologies=['OtherStack'])
+        self.finalize.side_effect = self.real_finalize
+        self.assertEqual(gui.start(body), {'ok': True})
+        saved = json.loads(apply.SETTINGS_FILE.read_text(encoding='utf-8'))
+        self.assertEqual(saved['target_technologies'], ['ArbitraryStack', 'C++'])
+        self.assertEqual(saved['excluded_technologies'], ['OtherStack'])
+        self.assertIsNone(apply.job_ok('Software Engineer', 'Example', 'ArbitraryStack with Python required.'))
+        self.assertEqual(apply.job_ok('Software Engineer', 'Example', 'OtherStack required.'), 'excluded_technology')
+        self.finish_worker()
+        body.update(target_technologies=[], excluded_technologies=[])
+        self.assertEqual(gui.start(body), {'ok': True})
+        self.assertIsNone(apply.job_ok('Software Engineer', 'Example', 'OtherStack required.'))
+
+    def test_bad_or_conflicting_technology_rules_do_not_publish_or_start(self):
+        for rules in [{'excluded_technologies': 'Python'}, {'target_technologies': [1]},
+                      {'excluded_technologies': ['x\ny']},
+                      {'target_technologies': ['Ruby'], 'excluded_technologies': ['ruby']}]:
+            before = self.snapshot()
+            body = {**self.body(), **rules}
+            self.assertEqual(gui.start(body)['error'], 'invalid_settings')
+            self.assertEqual(self.snapshot(), before)
+            self.assert_idle()
         self.factory.assert_not_called()

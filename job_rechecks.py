@@ -8,13 +8,15 @@ from pathlib import Path
 import shutil
 from job_relevance import VERSION as RELEVANCE_REVISION
 
-RECHECKABLE = frozenset({'metadata_manual', 'title_not_relevant', 'relevance_manual'})
+RECHECKABLE = frozenset({'metadata_manual', 'title_not_relevant', 'relevance_manual',
+                       'required_stack_incompatible', 'specialized_role', 'excluded_technology'})
 PARSER_REVISION = 'linkedin-details-v2'
 
 
 def revision(config: dict, settings: dict) -> str:
     content = {'parser': PARSER_REVISION, 'relevance_revision': RELEVANCE_REVISION, 'filters': config['filters'], 'search': config['search'],
-               'relevance_profile': settings.get('relevance_profile'),
+               'target_technologies': settings.get('target_technologies', []),
+               'excluded_technologies': settings.get('excluded_technologies', []),
                'job_search_titles': settings.get('job_search_titles'),
                'profile_country': settings.get('cv_profile', {}).get('country')}
     return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()

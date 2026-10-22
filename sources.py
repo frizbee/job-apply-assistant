@@ -241,15 +241,22 @@ def wellfound(page):
             seen.add(jid)
             url = f"https://wellfound.com/jobs/{jid}"
             prev = core.load_applied().get(f"wellfound:{jid}")
-            if prev and not core.can_retry(prev["status"]):
+            if prev and not core.can_retry(prev["status"]) and prev['status'] not in core.job_rechecks.RECHECKABLE:
                 continue
             if not goto(page, url, "Wellfound"):
                 return
             # Page title: "Machine Learning Engineer at Noesia • San Francisco • Remote".
             m = re.match(r"(.+?) at (.+?)(?: •|$)", page.title())
             title, company = (m.group(1), m.group(2)) if m else (page.title(), "")
+            metadata = core.read_job_metadata(page, 'wellfound', url)
+            description = metadata.get('description') or ''
+            if description:
+                description = html.unescape(re.sub(r'<[^>]+>', '\n', description))
+            else:
+                scoped = page.locator('[data-testid="job-description"], [data-test="job-description"], #job-description, .job-description')
+                description = scoped.first.inner_text() if scoped.count() else ''
             job = {"id": f"wellfound:{jid}", "title": title, "company": company, "url": url,
-                   "desc": page.locator("body").inner_text()[:20000], "location": ""}
+                   "desc": description, "location": "", 'metadata': metadata}
             yield job, (lambda applied=None, job=job: wellfound_apply(page, job, applied))
 
 
@@ -376,7 +383,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
                     core.log(f"- skip [{reason}] {job['title']} @ {job['company']}")
-                    core.record_relevance_decision(applied, job['id'], job['title'], job['company'], reason, job['url'])
+                    core.record_relevance_decision(applied, job['id'], job['title'], job['company'], reason, job['url'], job['desc'])
                     continue
                 metadata = job.get("metadata") or {}
                 # Resolve unknown metadata from this job's detail page, not search cards.

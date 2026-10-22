@@ -1,59 +1,88 @@
-"""Deterministic, conservative Rails/backend suitability; job text is data only."""
+"""Technology filtering driven exclusively by user-reviewed GUI settings."""
 import re
 
-VERSION = 'rails-backend-v3-user-regions'
-TARGET_ROLES = [
-    'Senior Ruby on Rails Developer', 'Senior Ruby on Rails Engineer', 'Senior Ruby Developer',
-    'Lead Ruby on Rails Developer', 'Ruby on Rails Technical Lead', 'Senior Backend Engineer',
-    'Senior Backend Developer', 'Lead Software Engineer', 'Senior Full Stack Developer',
-]
-RUBY = re.compile(r'\bruby\b|\brails\b|\bror\b', re.I)
-SPECIALIZED = re.compile(r'\bios\b|\bandroid\b|\bdata engineer|\bdata scientist|\bsre\b|site reliability|kubernetes|\bdevops\b|cloud (?:software )?architect|machine learning|\bai infrastructure\b|\bgtm\b|database engineer', re.I)
-GENERAL = re.compile(r'back[ -]?end|full[ -]?stack|(?:software|technical|tech)\s+(?:engineer|developer|lead|leader)|(?:lead|staff|senior|sr\.?|principal)\s+(?:software|engineer|developer)|desarrollador.*back', re.I)
-INCOMPATIBLE = re.compile(r'\bpython\b|\bdjango\b|\bjava\b|\bspring\b|\bgolang\b|\bgo\b(?!\s+(?:to|above|beyond|the|through|live|fast)\b)|\bc#|\.net\b|\belixir\b|\brust\b|\bphp\b|\blaravel\b|\bnode(?:\.js|js)?\b', re.I)
+VERSION = 'user-technology-filters-v1'
+FIELDS = ('target_technologies', 'excluded_technologies')
 REQUIRED = re.compile(r'\brequired\b|\bmust\b|\bmandatory\b|\bproficien|\bstrong (?:experience|knowledge)|\bexperience (?:with|in)|\bexpertise in|\b(?:build|develop|work).*\b(?:using|with|in)\b|requisito|obligatorio|experiencia (?:en|con)|experiência (?:em|com)', re.I)
 OPTIONAL = re.compile(r'nice.to.have|preferred|\bbonus\b|\ba plus\b|optional|not required|not necessary|no .*required|deseable|diferencial|valorable', re.I)
+REQUIRED_HEADING = re.compile(r'((?:technical |minimum |essential )?(?:requirements|qualifications)|what you bring|what you need|must.have|requisitos(?: técnicos)?|required skills)[:\s]*', re.I)
+OPTIONAL_HEADING = re.compile(r'(nice.to.have|preferred(?: skills)?|optional(?: skills)?|deseable)[:\s]*', re.I)
+OTHER_HEADING = re.compile(r'(benefits|responsibilities|what we offer|about (?:us|the company))[:\s]*', re.I)
 
 
-def reason(title: str, description: str) -> str | None:
-    if not title.strip():
-        return 'identity_unknown'
-    if SPECIALIZED.search(title):
-        return 'specialized_role'
-    explicit = bool(RUBY.search(title))
-    if explicit and not re.search(r'developer|engineer|lead|leader', title, re.I):
-        return 'title_not_relevant'
-    if not explicit and INCOMPATIBLE.search(title):
-        return 'required_stack_incompatible'
-    if not explicit and not GENERAL.search(title):
-        return 'title_not_relevant'
-    required_section, optional_section, ruby_core = False, False, False
+def validate_settings(settings: dict) -> None:
+    """Reject malformed lists and contradictory user rules before a run starts."""
+    for field in FIELDS:
+        values = settings.get(field, [])
+        if (not isinstance(values, list) or len(values) > 100
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 100
+                       or any(ord(c) < 32 for c in v) for v in values)):
+            raise ValueError(f'settings.{field}: expected up to 100 nonblank single-line technologies (100 characters each)')
+    targets = {v.strip().casefold() for v in settings.get('target_technologies', [])}
+    excluded = {v.strip().casefold() for v in settings.get('excluded_technologies', [])}
+    if targets & excluded:
+        raise ValueError('A technology cannot be both targeted and excluded')
+
+
+def matches(technology: str, text: str) -> bool:
+    """Literal case-insensitive terms, not user regex; preserve C++, C#, .NET."""
+    pattern = re.escape(technology.strip()).replace(r'\ ', r'\s+')
+    return bool(re.search(rf'(?<![\w+#.]){pattern}(?![\w+#])', text, re.I))
+
+
+def assess(title: str, description: str, *, target_technologies=(), excluded_technologies=()) -> dict:
+    """Return a reason and its evidence; no built-in language or role blacklist.
+
+    Targets mean at least one selected technology in the title/core description.
+    Exclusions apply to titles and mandatory requirements, never optional skills.
+    Missing evidence is manual review, not proof of an incompatible skill set.
+    """
+    targets = list(target_technologies)
+    excluded = list(excluded_technologies)
+    for technology in excluded:
+        if matches(technology, title):
+            return {'reason': 'excluded_technology', 'technology': technology, 'evidence': title[:500], 'source': 'title'}
+    target_seen = any(matches(tech, title) for tech in targets)
+    required_section, optional_section = False, False
     for line in description.splitlines():
-        text = line.strip()
-        if re.fullmatch(r'((?:technical |minimum |essential )?(?:requirements|qualifications)|what you bring|what you need|must.have|requisitos(?: técnicos)?|required skills)[:\s]*', text, re.I):
+        text = line.strip().lstrip('•*- ').strip()
+        if OPTIONAL_HEADING.fullmatch(text):
+            required_section, optional_section = False, True
+            continue
+        if REQUIRED_HEADING.fullmatch(text):
             required_section, optional_section = True, False
             continue
-        if re.fullmatch(r'(nice.to.have|preferred skills|benefits|responsibilities|what we offer|deseable)[:\s]*', text, re.I):
-            required_section, optional_section = False, bool(re.search('nice|preferred|deseable', text, re.I))
+        if OTHER_HEADING.fullmatch(text):
+            required_section, optional_section = False, False
             continue
-        for clause in re.split(r';|(?<=[.!?])\s+|,\s*', text):
-            if not clause or optional_section or OPTIONAL.search(clause):
-                continue
-            if RUBY.search(clause) and INCOMPATIBLE.search(clause) and re.search(r'migrat|moving away|replace.*ruby|legacy', clause, re.I):
-                return 'stack_unknown'
-            if INCOMPATIBLE.search(clause) and (required_section or REQUIRED.search(clause)):
-                if RUBY.search(clause) and re.search(r'\bor\b|\bo\b|\bou\b|/', clause, re.I):
-                    ruby_core = True
-                    continue  # Ruby is an explicitly accepted alternative.
-                return 'required_stack_incompatible'
-            if RUBY.search(clause):
-                ruby_core = True
-    if explicit:
-        return None
-    if not description.strip():
-        return 'stack_unknown'
-    # A generic Engineer title or an incidental optional Rails mention is insufficient.
-    if ruby_core:
-        return None
-    return 'stack_unknown'
+        heading, separator, rest = text.partition(':')
+        if separator and REQUIRED_HEADING.fullmatch(heading):
+            required_section, optional_section, text = True, False, rest.strip()
+        elif separator and OPTIONAL_HEADING.fullmatch(heading):
+            required_section, optional_section, text = False, True, rest.strip()
+        # Do not split comma-separated alternatives or punctuation inside .NET,
+        # Node.js etc.; a clause must retain its requirement/optional qualifier.
+        for clause in re.split(r';|(?<=[.!?])\s+(?=[A-Z])', text):
+            # Keep accepted alternatives together, but do not let "Ruby
+            # preferred" hide "Python required" in a separate comma clause.
+            alternatives = re.search(r'\bor\b|\bo\b|\bou\b', clause, re.I)
+            parts = [clause] if alternatives and not OPTIONAL.search(clause) else re.split(r',\s*', clause)
+            for part in parts:
+                if not part or optional_section or OPTIONAL.search(part):
+                    continue
+                positive = any(matches(tech, part) for tech in targets)
+                negative = next((tech for tech in excluded if matches(tech, part)), None)
+                if negative and (required_section or REQUIRED.search(part)):
+                    if positive and re.search(r'\bor\b|\bo\b|\bou\b', part, re.I):
+                        # An explicitly accepted target alternative is not a conflict.
+                        target_seen = True
+                        continue
+                    return {'reason': 'excluded_technology', 'technology': negative, 'evidence': part[:500], 'source': 'requirement'}
+                target_seen = target_seen or positive
+    if targets and not target_seen:
+        return {'reason': 'stack_unknown', 'evidence': 'No selected target technology found in the title or non-optional job description'}
+    return {'reason': None}
 
+
+def reason(title: str, description: str, **settings) -> str | None:
+    return assess(title, description, **settings)['reason']

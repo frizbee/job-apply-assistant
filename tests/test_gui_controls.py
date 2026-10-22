@@ -35,6 +35,24 @@ class GUIControlTests(unittest.TestCase):
             self.assertEqual(calls[0]["headers"]["X-Token"], "__TOKEN__")
             self.assertFalse(result["quitActive"])
 
+    def test_technology_fields_start_empty_without_silent_defaults(self):
+        result = self.run_ui()
+        self.assertEqual(result['technologyValues'], {'target': '', 'excluded': ''})
+
+    def test_technology_fields_load_save_and_clear_through_real_javascript(self):
+        settings = {'target_technologies': ['ArbitraryStack', 'C++'], 'excluded_technologies': ['OtherStack']}
+        result = self.run_ui(scenario='technology-start', settings=settings,
+                             targetText='Python\n C# \n', excludedText='Custom.Language\nOtherStack')
+        self.assertEqual(result['technologyValues'], {'target': 'ArbitraryStack\nC++', 'excluded': 'OtherStack'})
+        request = next(r for r in result['requests'] if r['path'] == '/api/start')
+        body = json.loads(request['body'])
+        self.assertEqual(body['target_technologies'], ['Python', 'C#'])
+        self.assertEqual(body['excluded_technologies'], ['Custom.Language', 'OtherStack'])
+        result = self.run_ui(scenario='technology-start', settings=settings, targetText='', excludedText='')
+        body = json.loads(next(r for r in result['requests'] if r['path'] == '/api/start')['body'])
+        self.assertEqual(body['target_technologies'], [])
+        self.assertEqual(body['excluded_technologies'], [])
+
     def test_language_buttons_switch_and_preserve_english_selection(self):
         result = self.run_ui(scenario="switch", saved="en")
         self.assertEqual([s["lang"] for s in result["switched"]], ["tr", "en"])

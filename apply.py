@@ -287,6 +287,7 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
                        'evaluated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'reason': status,
                        'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
     applied[job_id].pop('metadata_diagnostic', None)
+    applied[job_id].pop('technology_diagnostic', None)
     decisions.append(job_rechecks.snapshot(applied[job_id]))
     applied[job_id]['decisions'] = decisions
     write_applied(applied)
@@ -1800,15 +1801,6 @@ def job_ok(title: str, company: str, description: str) -> str | None:
     t, d = title.lower(), description.lower()
     if not title.strip() or not company.strip():
         return 'identity_unknown'
-    if SETTINGS.get('relevance_profile') == 'rails_backend':
-        reason = job_relevance.reason(title, description)
-        if reason:
-            return reason
-        if any(re.search(p, t) for p in f['title_exclude']):
-            return 'title_excluded'
-        if any(re.search(p, d) for p in f.get('description_exclude', [])):
-            return 'description_excluded'
-        return 'company_excluded' if any(c.lower() in company.lower() for c in f.get('exclude_companies', [])) else None
     if not any(re.search(p, t) for p in f["title_include"]):
         return "title_not_relevant"
     if not all(re.search(p, t) for p in f.get("title_require", [])):
@@ -1819,7 +1811,13 @@ def job_ok(title: str, company: str, description: str) -> str | None:
         return "description_excluded"
     if any(c.lower() in company.lower() for c in f.get("exclude_companies", [])):
         return "company_excluded"
-    return None
+    return job_relevance.reason(title, description, **technology_filters())
+
+
+def technology_filters() -> dict:
+    """Only explicitly saved user lists authorize technology filtering."""
+    job_relevance.validate_settings(SETTINGS)
+    return {field: list(SETTINGS.get(field, [])) for field in job_relevance.FIELDS}
 
 
 def read_job_metadata(page: Page, source: str, url: str) -> dict:
@@ -1889,13 +1887,17 @@ def should_visit_job(applied: dict, job_id: str) -> bool:
     return False
 
 
-def record_relevance_decision(applied: dict, job_id: str, title: str, company: str, reason: str, url: str) -> None:
+def record_relevance_decision(applied: dict, job_id: str, title: str, company: str, reason: str, url: str, description: str = '') -> None:
     if reason in MANUAL_RELEVANCE:
         record_manual(job_id, title, company, url, reason)
     record(applied, job_id, title, company, 'relevance_manual' if reason in MANUAL_RELEVANCE else reason, url)
     if applied.get(job_id, {}).get('decisions'):
         applied[job_id]['reason'] = reason
         applied[job_id]['decisions'][-1]['reason'] = reason
+        if reason in ('excluded_technology', 'stack_unknown'):
+            evidence = job_relevance.assess(title, description, **technology_filters())
+            applied[job_id]['technology_diagnostic'] = evidence
+            applied[job_id]['decisions'][-1]['technology_diagnostic'] = evidence
         write_applied(applied)
 
 
@@ -1959,6 +1961,7 @@ def finalize_settings() -> None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
     current_llm_config(require_model=False)
+    job_relevance.validate_settings(SETTINGS)
     locations = selected_locations()
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2), encoding="utf-8")
     PROFILE["resume_file"] = SETTINGS["resume"]
@@ -2096,9 +2099,6 @@ def apply_cv_profile(prof: dict) -> None:
     roles = {re.findall(r"[\w+#]+", t.lower())[-1] for t in prof["job_titles"] if re.findall(r"[\w+#]+", t)}
     roles |= {"engineer", "developer", "scientist", "analyst", "architect", "researcher", "specialist", "lead"} & words
     CFG["filters"]["title_require"] = ["|".join(rf"\b{re.escape(w)}" for w in sorted(roles))] if roles else []
-    if SETTINGS.get('relevance_profile') == 'rails_backend':
-        CFG['filters']['title_include'] = [r'\bruby\b|\brails\b|back[ -]?end|full[ -]?stack|software|technical lead|tech lead']
-        CFG['filters']['title_require'] = [r'\b(?:engineer|developer|lead|leader)\b']
     # Residence does not establish work authorization or willingness to commute.
     # AI-estimated skill years are not shown for confirmation in the GUI.
     # Keep only the user's explicit skill_years configuration, never CV estimates.
@@ -2128,7 +2128,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         reason = job_ok(title, company, desc) or ("applied_elsewhere" if applied_elsewhere(applied, title, company) else None)
         if reason:
             log(f"- skip [{reason}] {title} @ {company}")
-            record_relevance_decision(applied, job_id, title, company, reason, f'https://www.linkedin.com/jobs/view/{job_id}/')
+            record_relevance_decision(applied, job_id, title, company, reason, f'https://www.linkedin.com/jobs/view/{job_id}/', desc)
             return False
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
         job = {"id": job_id, "title": title, "company": company, "url": url, 'desc': desc,

@@ -39,7 +39,7 @@ const localStorage = {
   getItem() { if (input.blockStorage) throw Error("Storage disabled"); return stored; },
   setItem(key, value) { if (input.blockStorage) throw Error("Storage disabled"); stored = value; },
 };
-const state = { settings: {}, profile: null, cv_name: "", has_key: false,
+const state = { settings: input.settings || {}, profile: null, cv_name: "", has_key: false,
   default_locations: ["Worldwide"], running: input.running || false, profile_error: input.profileError || "" };
 const context = vm.createContext({ document, localStorage, navigator: { language: input.navigator || "en-US" },
   async fetch(path, options) {
@@ -58,6 +58,12 @@ async function main() {
   const quit = elements.get("quit");
   const before = read("lang");
   const switched = [];
+  const technologyValues = {target: elements.get('target_technologies').value, excluded: elements.get('excluded_technologies').value};
+  if (input.scenario === 'technology-start') {
+    elements.get('target_technologies').value = input.targetText ?? technologyValues.target;
+    elements.get('excluded_technologies').value = input.excludedText ?? technologyValues.excluded;
+    await elements.get('start').click();
+  }
   if (input.scenario === "switch" || input.scenario === "blocked-switch") {
     for (const button of [tr, en]) {
       button.click();
@@ -82,7 +88,7 @@ async function main() {
       await pending;
     }
   }
-  process.stdout.write(JSON.stringify({ before, lang: read("lang"), stored, requests, switched,
+  process.stdout.write(JSON.stringify({ before, lang: read("lang"), stored, requests, switched, technologyValues,
     quitText: quit.textContent, quitActive: quit.classList.contains("on"), body: body.innerHTML,
     timers: timers.size, english: elements.get("english").value, message: elements.get("m1").textContent }));
 }

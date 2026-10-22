@@ -14,6 +14,10 @@ import job_metadata
 import job_relevance
 import job_rechecks
 
+TARGET_ROLES = ['Senior Ruby on Rails Developer', 'Senior Ruby on Rails Engineer', 'Senior Ruby Developer',
+                'Lead Ruby on Rails Developer', 'Ruby on Rails Technical Lead', 'Senior Backend Engineer',
+                'Senior Backend Developer', 'Lead Software Engineer', 'Senior Full Stack Developer']
+
 
 class LocalizedDateTests(unittest.TestCase):
     def test_localized_rounded_dates_are_conservative(self):
@@ -26,44 +30,68 @@ class LocalizedDateTests(unittest.TestCase):
             self.assertIsNone(job_metadata.posting_time(text))
 
 
-class RailsRelevanceTests(unittest.TestCase):
-    def test_all_explicit_rails_titles_are_supported(self):
-        for title in job_relevance.TARGET_ROLES[:5] + ['Senior Fullstack Ruby on Rails Developer']:
-            self.assertIsNone(job_relevance.reason(title, ''), title)
+class UserTechnologyTests(unittest.TestCase):
+    def test_empty_lists_never_infer_technology_or_specialty_exclusions(self):
+        for tech in ['Ruby', 'Python', 'Django', 'Java', 'Spring', 'Go', 'C#', '.NET', 'Rust', 'Node.js', 'iOS', 'Kubernetes', 'ArbitraryStack']:
+            self.assertIsNone(job_relevance.reason(f'Senior {tech} Engineer', f'{tech} is required.'), tech)
 
-    def test_generic_roles_need_description_not_senior_engineer_words(self):
-        for title in job_relevance.TARGET_ROLES[5:]:
-            self.assertEqual(job_relevance.reason(title, ''), 'stack_unknown', title)
-            self.assertIsNone(job_relevance.reason(title, 'Build our SaaS backend with Ruby on Rails, PostgreSQL and Redis.'))
+    def test_targets_come_only_from_the_user(self):
+        for tech in ['Ruby', 'Python', 'Django', 'ArbitraryStack']:
+            settings = {'target_technologies': [tech]}
+            self.assertIsNone(job_relevance.reason(f'{tech} Engineer', '', **settings))
+            self.assertIsNone(job_relevance.reason('Senior Backend Engineer', f'Build with {tech}.', **settings))
+            self.assertEqual(job_relevance.reason('Senior Backend Engineer', '', **settings), 'stack_unknown')
 
-    def test_specialized_roles_are_not_admitted_by_engineer_or_ruby(self):
-        for title in ['Senior iOS Engineer', 'Senior Android Engineer', 'Data Engineering Lead', 'Senior SRE',
-                      'Kubernetes Operator & CSI Engineer', 'Senior Site Reliability Engineer', 'Data Scientist']:
-            self.assertEqual(job_relevance.reason(title, 'Ruby on Rails integrations'), 'specialized_role', title)
+    def test_only_user_excluded_title_or_required_stack_is_rejected(self):
+        for tech in ['Python', 'Java', 'ArbitraryStack', 'C++', 'C#', '.NET', 'Node.js']:
+            settings = {'excluded_technologies': [tech]}
+            for title, desc in [(f'{tech} Engineer', ''), ('Engineer', f'{tech} is required.'),
+                                ('Engineer', f'Technical Requirements:\n{tech}')]:
+                self.assertEqual(job_relevance.reason(title, desc, **settings), 'excluded_technology', tech)
+            self.assertIsNone(job_relevance.reason('Engineer', f'{tech} is required.'))
 
-    def test_mandatory_incompatible_stack_is_rejected(self):
-        for desc in ['Java is required.', 'Requirements:\nPython and Django', 'Must have experience with Golang.',
-                     'Experience with C# and .NET is required.', 'Java is required, Ruby preferred.']:
-            self.assertEqual(job_relevance.reason('Senior Ruby on Rails Developer', desc), 'required_stack_incompatible', desc)
+    def test_optional_excluded_technology_does_not_reject(self):
+        for desc in ['Python is a nice-to-have.', 'Requirements:\nRuby\nNice to have:\nPython',
+                     'Ruby backend. Python preferred.']:
+            self.assertIsNone(job_relevance.reason('Ruby Engineer', desc, excluded_technologies=['Python']), desc)
 
-    def test_desirable_stack_is_not_a_mandatory_rejection(self):
-        for desc in ['Ruby on Rails backend.\nPython is a nice-to-have.',
-                     'Requirements:\nRuby on Rails\nNice to have:\nJava and Kubernetes',
-                     'Experience with Ruby or Python required.']:
-            self.assertIsNone(job_relevance.reason('Senior Backend Engineer', desc), desc)
+    def test_accepted_target_alternative_does_not_reject(self):
+        self.assertIsNone(job_relevance.reason('Engineer', 'Experience with Ruby or Python required.',
+                                              target_technologies=['Ruby'], excluded_technologies=['Python']))
 
-    def test_ordinary_go_phrase_and_ruby_sales_title_are_not_language_proofs(self):
-        self.assertIsNone(job_relevance.reason('Senior Ruby Developer', 'You must go above and beyond for customers.'))
-        self.assertEqual(job_relevance.reason('Ruby Account Manager', ''), 'title_not_relevant')
-        self.assertEqual(job_relevance.reason('Software Engineer - Python', ''), 'required_stack_incompatible')
+    def test_optional_target_alone_does_not_establish_fit(self):
+        for desc in ['Ruby is a nice-to-have.', 'Nice to have:\nRuby']:
+            self.assertEqual(job_relevance.reason('Engineer', desc, target_technologies=['Ruby']), 'stack_unknown')
 
-    def test_technical_requirement_heading_and_uncertain_migration(self):
-        self.assertEqual(job_relevance.reason('Senior Ruby Developer', 'Technical Requirements:\nJava and Spring'), 'required_stack_incompatible')
-        self.assertEqual(job_relevance.reason('Senior Backend Engineer', 'Migrate our legacy Ruby backend to Go.'), 'stack_unknown')
+    def test_literal_boundaries_preserve_punctuation_and_not_regex(self):
+        for tech, text in [('Java', 'JavaScript'), ('Go', 'Django'), ('C', 'C++'), ('Node.js', 'NodeXjs'), ('Ruby.*', 'Ruby on Rails')]:
+            self.assertFalse(job_relevance.matches(tech, text), (tech, text))
+        for tech in ['C++', 'C#', '.NET', 'Node.js', 'Ruby on Rails']:
+            self.assertTrue(job_relevance.matches(tech, 'Must use ' + tech + '.'), tech)
 
-    def test_optional_ruby_alone_does_not_establish_fit(self):
-        self.assertEqual(job_relevance.reason('Senior Backend Engineer', 'Ruby on Rails is a nice-to-have.'), 'stack_unknown')
-        self.assertEqual(job_relevance.reason('Senior Backend Engineer', 'Nice to have:\nRuby on Rails'), 'stack_unknown')
+    def test_validation_rejects_malformed_and_conflicting_lists(self):
+        for value in ['Python', None, [1], [''], ['x\ny'], ['x' * 101], ['a'] * 101]:
+            with self.assertRaises(ValueError):
+                job_relevance.validate_settings({'excluded_technologies': value})
+        with self.assertRaises(ValueError):
+            job_relevance.validate_settings({'target_technologies': [' Ruby '], 'excluded_technologies': ['ruby']})
+        job_relevance.validate_settings({})
+
+    def test_exclusion_records_exact_user_term_and_evidence(self):
+        result = job_relevance.assess('Backend Engineer', 'Requirements:\nArbitraryStack is required.', excluded_technologies=['ArbitraryStack'])
+        self.assertEqual(result['technology'], 'ArbitraryStack')
+        self.assertEqual(result['evidence'], 'ArbitraryStack is required.')
+        self.assertEqual(result['source'], 'requirement')
+
+    def test_inline_requirement_heading_is_not_missed(self):
+        self.assertEqual(job_relevance.reason('Engineer', 'Requirements: CustomStack', excluded_technologies=['CustomStack']), 'excluded_technology')
+        self.assertIsNone(job_relevance.reason('Engineer', 'Nice to have: CustomStack', excluded_technologies=['CustomStack']))
+
+    def test_optional_clause_does_not_hide_separate_mandatory_exclusion(self):
+        self.assertEqual(job_relevance.reason('Engineer', 'Python required, Ruby preferred.',
+                                             excluded_technologies=['Python']), 'excluded_technology')
+        self.assertIsNone(job_relevance.reason('Engineer', 'Experience with Python, Ruby or Java required.',
+                                              target_technologies=['Ruby'], excluded_technologies=['Python']))
 
     def test_relevance_module_has_no_candidate_country_policy(self):
         self.assertFalse(hasattr(job_relevance, 'argentina_location_reason'))
@@ -114,6 +142,17 @@ class RecheckTests(SafetyTest):
         self.assertFalse(apply.can_retry('title_not_relevant'))
         self.assertTrue(apply.can_retry('evaluation_passed'))
 
+    def test_configured_exclusion_saves_evidence_without_stale_diagnostic(self):
+        apply.SETTINGS['excluded_technologies'] = ['CustomStack']
+        apply.record_relevance_decision(self.history, 'job', 'Engineer', 'Example', 'excluded_technology',
+                                        'https://example.test', 'Requirements:\nCustomStack')
+        diagnostic = self.history['job']['technology_diagnostic']
+        self.assertEqual(diagnostic['technology'], 'CustomStack')
+        self.assertEqual(self.history['job']['decisions'][-1]['technology_diagnostic'], diagnostic)
+        apply.record(self.history, 'job', 'Engineer', 'Example', 'evaluation_passed')
+        self.assertNotIn('technology_diagnostic', self.history['job'])
+        self.assertEqual(self.history['job']['decisions'][-2]['technology_diagnostic'], diagnostic)
+
     def test_disabled_rechecks_and_failed_backup_do_not_unlock_history(self):
         apply.SETTINGS['recheck_enabled'] = False
         self.assertFalse(apply.should_visit_job(self.history, 'job'))
@@ -160,6 +199,26 @@ class RecheckTests(SafetyTest):
 
 
 class ProfileWiringTests(SafetyTest):
+    def test_legacy_profile_never_adds_technology_rules_or_rewrites_gui_titles(self):
+        import cv_profile
+        prof = cv_profile.empty_profile()
+        prof.update(job_titles=['Python Engineer'], country='Argentina')
+        apply.SETTINGS['relevance_profile'] = 'rails_backend'
+        apply.apply_cv_profile(prof)
+        self.assertEqual(apply.technology_filters(), {'target_technologies': [], 'excluded_technologies': []})
+        self.assertIsNone(apply.job_ok('Python Engineer', 'Example', 'Must use Python and Django.'))
+        self.assertEqual(apply.CFG['search']['keywords'], ['Python Engineer'])
+
+    def test_technology_rules_change_revision_and_legacy_skips_are_bounded_recheckable(self):
+        first = job_rechecks.revision(apply.CFG, apply.SETTINGS)
+        apply.SETTINGS['excluded_technologies'] = ['CustomStack']
+        self.assertNotEqual(first, job_rechecks.revision(apply.CFG, apply.SETTINGS))
+        for status in ['required_stack_incompatible', 'specialized_role', 'excluded_technology']:
+            value = {'status': status}
+            run = {'id': 'run', 'count': 0}
+            self.assertTrue(job_rechecks.claim(value, 'revision', run))
+            self.assertFalse(job_rechecks.claim(value, 'revision', run))
+
     def test_user_regions_are_preserved_verbatim_after_cv_application(self):
         import cv_profile
         regions = ['North America', 'Latin America', 'Europe']
@@ -196,12 +255,11 @@ class ProfileWiringTests(SafetyTest):
     def test_rails_search_and_confirmed_experience_do_not_use_generic_role_words_alone(self):
         import cv_profile
         prof = cv_profile.empty_profile()
-        prof.update(job_titles=job_relevance.TARGET_ROLES, total_years=17, country='Argentina')
-        apply.SETTINGS.update(relevance_profile='rails_backend', confirmed_skill_years={'Ruby': 14, 'Ruby on Rails': 14})
+        prof.update(job_titles=TARGET_ROLES, total_years=17, country='Argentina')
+        apply.SETTINGS.update(target_technologies=['Ruby'], confirmed_skill_years={'Ruby': 14, 'Ruby on Rails': 14})
         apply.apply_cv_profile(prof)
-        self.assertEqual(apply.CFG['search']['keywords'], job_relevance.TARGET_ROLES)
+        self.assertEqual(apply.CFG['search']['keywords'], TARGET_ROLES)
         self.assertEqual(apply.answer('Years of Ruby experience?', numeric=True), ['14'])
-        self.assertFalse(any(re.search(pattern, 'senior', re.I) for pattern in apply.CFG['filters']['title_include']))
         self.assertEqual(apply.job_ok('Senior Software Engineer', 'Example', ''), 'stack_unknown')
         self.assertIsNone(apply.job_ok('Senior Ruby on Rails Developer', 'Example', 'Ruby on Rails backend'))
 
@@ -292,3 +350,29 @@ class BrowserLinkedinLayoutTests(SafetyTest):
             self.assertTrue(apply.process_job(self.page, {}, '123'))
         self.assertEqual(self.page.locator('#years').input_value(), '14')
         self.assertEqual(self.page.evaluate('window.sent'), 0)
+
+    def test_wellfound_uses_only_verified_job_description_not_recommendations(self):
+        import sources
+        self.enterContext(patch.object(sources, 'core', apply))
+        self.enterContext(patch.object(apply, 'load_applied', return_value={}))
+        self.enterContext(patch.object(sources, 'goto', side_effect=lambda page, url, name: (page.goto(url), True)[1]))
+        url = 'https://wellfound.com/jobs/123-engineer'
+        self.html = '<title>Engineer at Example • Remote</title><a href="/jobs/123-engineer">Job</a>'
+        self.html += '<aside>Recommendations: Python is required.</aside><script type="application/ld+json">' + json.dumps({
+            '@type': 'JobPosting', 'url': url, 'title': 'Engineer', 'description': 'Ruby backend.',
+            'datePosted': '2026-10-20', 'jobLocationType': 'TELECOMMUTE'}) + '</script>'
+        apply.CFG['search']['keywords'] = ['Engineer']
+        job, _ = next(sources.wellfound(self.page))
+        self.assertEqual(job['desc'], 'Ruby backend.')
+        self.assertIsNone(job_relevance.reason(job['title'], job['desc'], excluded_technologies=['Python']))
+
+    def test_wellfound_without_scoped_description_does_not_fall_back_to_body(self):
+        import sources
+        self.enterContext(patch.object(sources, 'core', apply))
+        self.enterContext(patch.object(apply, 'load_applied', return_value={}))
+        self.enterContext(patch.object(sources, 'goto', side_effect=lambda page, url, name: (page.goto(url), True)[1]))
+        self.html = '<title>Engineer at Example • Remote</title><a href="/jobs/123-engineer">Job</a><aside>Ruby backend; Python is required.</aside>'
+        apply.CFG['search']['keywords'] = ['Engineer']
+        job, _ = next(sources.wellfound(self.page))
+        self.assertEqual(job['desc'], '')
+        self.assertEqual(job_relevance.reason(job['title'], job['desc'], target_technologies=['Ruby'], excluded_technologies=['Python']), 'stack_unknown')
