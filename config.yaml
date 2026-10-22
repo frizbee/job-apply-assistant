@@ -4,6 +4,34 @@
 # profil bilgileri CV'den gelen değerlerle değiştirilir (bu dosya değişmez).
 # ---------------------------------------------------------------
 
+# LLM profiles: only OpenRouter free_auto is implemented at this stage.
+# Native/explicit profiles are configuration placeholders; choose a model later.
+# API keys belong in .env, never here. paid_allowed is NOT payment consent.
+llm:
+  default_profile: free
+  profiles:
+    free:
+      provider: openrouter
+      selection: free_auto
+      model: null
+      cost_policy: free_only
+      max_output_tokens: 4096
+      timeout_seconds: 180
+    openai:
+      provider: openai
+      selection: explicit
+      model: null
+      cost_policy: paid_allowed
+      max_output_tokens: 4096
+      timeout_seconds: 180
+    claude:
+      provider: anthropic
+      selection: explicit
+      model: null
+      cost_policy: paid_allowed
+      max_output_tokens: 4096
+      timeout_seconds: 180
+
 search:
   # Arayüzde/CV'den gelen pozisyonlar bunun yerine kullanılır
   keywords:

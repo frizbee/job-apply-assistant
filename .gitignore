@@ -1,7 +1,10 @@
 screenshots/
 __pycache__/
 .venv/
+# Local API keys; only the empty template belongs in version control.
 .env
+.env.*
+!.env.example
 .browser-profile/
 build/
 dist/

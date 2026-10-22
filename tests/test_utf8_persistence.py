@@ -133,7 +133,7 @@ assert apply.find_key() == 'test-key'
         button.click.assert_not_called()
 
     def test_application_text_io_always_declares_utf8(self):
-        for name in ['apply.py', 'gui.py', 'cv_profile.py', 'sources.py', 'job_metadata.py']:
+        for name in ['apply.py', 'gui.py', 'cv_profile.py', 'sources.py', 'job_metadata.py', 'llm_config.py', 'llm_credentials.py']:
             tree = ast.parse((Path(apply.__file__).parent / name).read_text(encoding='utf-8'))
             for call in ast.walk(tree):
                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in {'read_text', 'write_text', 'open'}:

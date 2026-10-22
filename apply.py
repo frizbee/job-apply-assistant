@@ -34,7 +34,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
-import yaml
+import llm_config
+import llm_credentials
 import job_metadata
 from playwright.sync_api import Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeout
@@ -43,7 +44,7 @@ ROOT = Path(__file__).resolve().parent  # kod ve varsayılan config.yaml
 # Kullanıcı verisi: kaynak koddan çalışırken proje klasörü, indirilen uygulamada ~/AutoApply
 HOME = Path(os.getenv("AUTOAPPLY_HOME") or (Path.home() / "AutoApply" if getattr(sys, "frozen", False) else ROOT))
 (HOME / "data").mkdir(parents=True, exist_ok=True)
-CFG = yaml.safe_load(((HOME if (HOME / "config.yaml").exists() else ROOT) / "config.yaml").read_text(encoding="utf-8"))
+CFG = llm_config.load_yaml(((HOME if (HOME / "config.yaml").exists() else ROOT) / "config.yaml").read_text(encoding="utf-8"))
 APPLIED_FILE = HOME / "data" / "applied.json"
 LOG_FILE = HOME / "data" / "applications.csv"
 LAST_RUN_FILE = HOME / "data" / "last_run.txt"
@@ -1881,6 +1882,7 @@ def ask_settings() -> None:
 
 def load_settings() -> dict:
     saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")) if SETTINGS_FILE.exists() else {}
+    llm_config.resolve(CFG, saved.get('llm_preferences', {}), require_model=False)
     SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "currency": "USD", "english": "3", "notice": "14", **saved})
     return SETTINGS
 
@@ -1890,6 +1892,7 @@ def finalize_settings() -> None:
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
+    current_llm_config(require_model=False)
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2), encoding="utf-8")
     PROFILE["resume_file"] = SETTINGS["resume"]
     if SETTINGS.get("cv_profile"):
@@ -1908,22 +1911,18 @@ def api_key() -> str:
     return key
 
 
-def save_key(key: str) -> None:
-    env = HOME / ".env"
-    lines = [l for l in (env.read_text(encoding="utf-8").splitlines() if env.exists() else []) if not l.startswith("OPENROUTER_API_KEY=")]
-    env.write_text("\n".join(lines + [f"OPENROUTER_API_KEY={key}"]) + "\n", encoding="utf-8")
+def current_llm_config(*, require_model: bool = True, overrides=None) -> llm_config.ResolvedLLMConfig:
+    return llm_config.resolve(CFG, SETTINGS.get('llm_preferences', {}),
+                              {} if overrides is None else overrides, require_model=require_model)
 
 
-def find_key() -> str:
-    """Kullanıcının kendi ücretsiz OpenRouter anahtarı: ortam değişkeni veya .env."""
-    if os.getenv("OPENROUTER_API_KEY"):
-        return os.environ["OPENROUTER_API_KEY"]
-    env = HOME / ".env"
-    if env.exists():
-        m = re.search(r"^OPENROUTER_API_KEY=(.+)$", env.read_text(encoding="utf-8"), re.M)
-        if m:
-            return m.group(1).strip().strip("'\"")
-    return ""
+def save_key(key: str, provider: str = 'openrouter') -> None:
+    llm_credentials.save(HOME, provider, key)
+
+
+def find_key(provider: str = 'openrouter') -> str:
+    """Backward-compatible OpenRouter default; other providers stay isolated."""
+    return llm_credentials.load(HOME, provider).value
 
 
 def show_profile(prof: dict, locations: list[str]) -> None:
@@ -1948,13 +1947,17 @@ def cv_setup() -> None:
     cached = SETTINGS.get("cv_profile") if SETTINGS.get("cv_hash") == digest else None
     prof = dict(cached) if cv_profile.valid(cached) else None
     if not prof:
+        config = current_llm_config()
+        if not config.legacy_supported:
+            raise llm_config.LLMConfigError('Selected LLM adapter is not implemented yet; no fallback was performed')
         key = api_key()
         if not key:
             SETTINGS.pop("cv_profile", None)
             return
         print("CV analiz ediliyor...")
         try:
-            prof = cv_profile.extract(resume, key, log=print)
+            prof = cv_profile.extract(resume, key, log=print, max_output_tokens=config.max_output_tokens,
+                                      timeout_seconds=config.timeout_seconds)
             cv_profile.validate(prof)
         except Exception as e:
             print(f"  ! CV analiz edilemedi ({e.__class__.__name__}: {str(e)[:150]}); config.yaml kullanılacak.")
@@ -2173,6 +2176,9 @@ def main() -> int:
         return run_bot()
     except ProfileValidationError as e:
         log(f"Invalid profile: {e}. Review your details or read the CV again.")
+        return 1
+    except (llm_config.LLMConfigError, llm_credentials.CredentialError) as e:
+        log(f'LLM configuration error: {e}')
         return 1
 
 

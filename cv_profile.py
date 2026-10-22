@@ -86,19 +86,19 @@ def cv_text(path: Path) -> str:
     return re.sub(r"<[^>]+>", "", re.sub(r"</w:p>", "\n", xml))
 
 
-def request(path: str, key: str, body: dict | None = None) -> dict:
+def request(path: str, key: str, body: dict | None = None, *, timeout_seconds: int = 180) -> dict:
     req = urllib.request.Request(
         API + path, data=json.dumps(body).encode() if body else None,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                  "HTTP-Referer": "https://github.com/klncgty/linkedin-auto-apply", "X-Title": "Auto Apply"})
-    with urllib.request.urlopen(req, timeout=180, context=SSL_CTX) as r:
+    with urllib.request.urlopen(req, timeout=timeout_seconds, context=SSL_CTX) as r:
         return json.loads(r.read())
 
 
-def free_models(key: str) -> list[tuple[str, bool]]:
+def free_models(key: str, *, timeout_seconds: int = 180) -> list[tuple[str, bool]]:
     """(model, structured_outputs) listesi; sadece istem ve yanıt fiyatı 0 olan modeller."""
     free = {}
-    for m in request("/models", key)["data"]:
+    for m in request("/models", key, timeout_seconds=timeout_seconds)["data"]:
         p = m.get("pricing", {})
         if m["id"].endswith(":free") and all(float(p.get(k) or 0) == 0 for k in ("prompt", "completion", "request")):
             free[m["id"]] = "structured_outputs" in m.get("supported_parameters", [])
@@ -185,20 +185,25 @@ def valid(prof) -> bool:
     return True
 
 
-def extract(path: Path, key: str, log=print) -> dict:
+def extract(path: Path, key: str, log=print, *, max_output_tokens: int = 4096, timeout_seconds: int = 180) -> dict:
+    if type(max_output_tokens) is not int or not 256 <= max_output_tokens <= 4096:
+        raise ValueError('Invalid output token limit')
+    if type(timeout_seconds) is not int or not 10 <= timeout_seconds <= 180:
+        raise ValueError('Invalid request timeout')
     text = cv_text(path).strip()
     if len(text) < 200:
         raise ValueError("CV'den metin okunamadı (taranmış/resim PDF olabilir)")
     prompt = PROMPT.format(schema=json.dumps(SCHEMA), cv=text[:60000])
     errors = []
-    for model, structured in free_models(key)[:4]:
+    for model, structured in free_models(key, timeout_seconds=timeout_seconds)[:4]:
         assert model.endswith(":free")
-        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2}
+        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2,
+                "max_tokens": max_output_tokens}
         if structured:
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "profile", "strict": True, "schema": SCHEMA}}
         try:
-            resp = request("/chat/completions", key, body)
+            resp = request("/chat/completions", key, body, timeout_seconds=timeout_seconds)
             prof = parse_json(resp["choices"][0]["message"]["content"] or "")
             return validate(prof)
         except urllib.error.HTTPError as e:

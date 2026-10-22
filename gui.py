@@ -20,6 +20,8 @@ from pathlib import Path
 
 import apply
 import cv_profile
+import llm_config
+import llm_credentials
 
 TOKEN = secrets.token_urlsafe(16)
 STATE = {"running": False, "analyzing": False}
@@ -89,13 +91,31 @@ def state() -> dict:
             prof, profile_error = None, str(e)
         if prof is not None and (not digest or s.get('cv_hash') != digest):
             prof, profile_error = None, 'profile: CV changed or cannot be verified; read it again or enter a new profile'
+    llm, llm_error, has_key = None, '', False
+    try:
+        selected = apply.current_llm_config(require_model=False)
+        _, choices = llm_config.profiles(apply.CFG)
+        llm = {**selected.public(), 'available': selected.legacy_supported,
+               'profiles': {name: config.public() for name, config in choices.items()}}
+        has_key = bool(apply.find_key(selected.provider))
+    except (llm_config.LLMConfigError, llm_credentials.CredentialError) as e:
+        llm_error = str(e)
+    credentials = {}
+    for provider in llm_credentials.KEY_NAMES:
+        try:
+            credentials[provider] = llm_credentials.load(apply.HOME, provider).public()
+        except llm_credentials.CredentialError:
+            credentials[provider] = {'provider': provider, 'has_key': False, 'source': 'error'}
     return {
         "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode")},
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
         "profile": prof,
         "profile_error": profile_error,
         "cv_hash": digest,
-        "has_key": bool(apply.find_key()),
+        "has_key": has_key,
+        "llm": llm,
+        "llm_error": llm_error,
+        "credentials": credentials,
         "english_levels": {k: v[0] for k, v in apply.ENGLISH_LEVELS.items()},
         "default_locations": apply.CFG["search"]["locations"],
         "running": STATE["running"],
@@ -140,18 +160,25 @@ def analyze(body: dict) -> dict:
         return busy_error()
     try:
         return _analyze(body)
+    except llm_config.LLMConfigError as e:
+        return {'error': 'invalid_llm_config', 'detail': str(e)}
+    except llm_credentials.CredentialError as e:
+        return {'error': 'invalid_key_config', 'detail': str(e)}
     finally:
         finish_activity("analyzing")
 
 
 def _analyze(body: dict) -> dict:
+    config = apply.current_llm_config()
+    if not config.legacy_supported:
+        return {'error': 'llm_not_implemented'}
     key = re.sub(r"[\s\u200b-\u200d\ufeff]", "", body.get("key") or "")  # kopyalamada gelen boşluk/görünmez karakterler
     if key:
         if not re.fullmatch(r"sk-or-[A-Za-z0-9_-]{20,}", key):
             return {"error": "short_key"}  # listedeki kısaltılmış "sk-or-v1-abc...123" kopyalanmış
         body["key"] = key
         try:
-            cv_profile.request("/key", key)
+            cv_profile.request("/key", key, timeout_seconds=config.timeout_seconds)
         except cv_profile.urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 return {"error": "bad_key"}
@@ -159,7 +186,7 @@ def _analyze(body: dict) -> dict:
         except Exception as e:
             return {"error": "analyze_failed", "detail": f"{e.__class__.__name__}: {str(e)[:150]}"}
         apply.save_key(body["key"].strip())
-    key = apply.find_key()
+    key = key or apply.find_key(config.provider)
     if not key:
         return {"error": "no_key"}
     resume = Path(apply.SETTINGS.get("resume") or "missing")
@@ -170,7 +197,8 @@ def _analyze(body: dict) -> dict:
         digest = resume_hash(resume)
         if apply.SETTINGS.get('cv_hash') != digest:
             clear_cv_profile()
-        prof = cv_profile.extract(resume, key, log=apply.log)
+        prof = cv_profile.extract(resume, key, log=apply.log, max_output_tokens=config.max_output_tokens,
+                                  timeout_seconds=config.timeout_seconds)
         cv_profile.validate(prof)
         if resume_hash(resume) != digest:
             clear_cv_profile()
@@ -473,6 +501,7 @@ const T = {
   test_on:"Test mode is ON: this is only a test run. Forms are filled in but NO application is sent. Untick the box to really apply.",
   chrome_notice:"A Chrome window will open. The first time, log in to LinkedIn (and Indeed / Wellfound if selected) in that window, or tick a 'verify you are human' box if asked. The bot waits for you and remembers the login.",
   start:"Start applying", stop:"Stop", results:"Open results folder", progress:"Progress", running:"Running...", finished:"Finished. See the results folder for the full list.",
+   err_invalid_llm_config:"Invalid LLM configuration.", err_invalid_key_config:"Cannot load the selected API key.", err_llm_not_implemented:"The selected LLM adapter is not implemented yet. Use the free profile or enter your details manually.",
    cv_replaced:"CV contents changed. Read it again or enter and check a new profile.", err_cv_changed:"The CV changed. Review the current file and enter or read your profile again.",
    err_no_cv:"Please choose your CV first.", err_no_key:"Please paste your free OpenRouter key above, or skip and fill in your details yourself.", err_bad_key:"This key doesn't work. Copy it again from OpenRouter and paste the whole key.",
   err_short_key:"This looks like the shortened key from OpenRouter's list (with '...'). OpenRouter shows the full key only once: click Create to make a new key, then click Copy in the window that appears and paste it here.", err_pdf_docx_only:"Only .pdf or .docx files.",
@@ -496,6 +525,7 @@ const T = {
   test_on:"Test modu AÇIK: bu sadece bir deneme. Formlar doldurulur ama HİÇBİR başvuru gönderilmez. Gerçekten başvurmak için işareti kaldır.",
   chrome_notice:"Bir Chrome penceresi açılacak. İlk seferde o pencerede LinkedIn'e (seçtiysen Indeed / Wellfound'a da) giriş yap; 'insan mısın' kutusu çıkarsa işaretle. Bot seni bekler ve girişi hatırlar.",
   start:"Başvurmaya başla", stop:"Durdur", results:"Sonuç klasörünü aç", progress:"İlerleme", running:"Çalışıyor...", finished:"Bitti. Tam liste sonuç klasöründe.",
+   err_invalid_llm_config:"Geçersiz LLM ayarları.", err_invalid_key_config:"Seçilen API anahtarı okunamadı.", err_llm_not_implemented:"Seçilen LLM bağlantısı henüz uygulanmadı. Ücretsiz profili kullan veya bilgilerini elle gir.",
    cv_replaced:"CV içeriği değişti. Yeniden oku veya yeni profilini doldurup kontrol et.", err_cv_changed:"CV değişti. Güncel dosyayı kontrol edip profilini yeniden doldur veya oku.",
    err_no_cv:"Önce CV'ni seç.", err_no_key:"Yukarıdaki kutuya ücretsiz OpenRouter anahtarını yapıştır ya da geçip bilgilerini kendin doldur.", err_bad_key:"Bu anahtar çalışmıyor. OpenRouter'dan tekrar kopyalayıp anahtarın tamamını yapıştır.",
   err_short_key:"Bu, OpenRouter listesindeki kısaltılmış anahtar gibi görünüyor ('...' içeriyor). OpenRouter tam anahtarı sadece bir kez gösterir: Create ile yeni anahtar oluştur, açılan penceredeki Copy butonuna basıp buraya yapıştır.", err_pdf_docx_only:"Sadece .pdf veya .docx.",
@@ -552,6 +582,8 @@ async function load() {
   $("test_mode").checked = st.test_mode ?? false;
   fill(S.profile, !!S.profile);
   if (S.profile_error) err("m1", { error: "invalid_profile", detail: S.profile_error });
+  if (S.llm_error) err("m1", { error: "invalid_llm_config", detail: S.llm_error });
+  else if (S.llm && !S.llm.available) err("m1", { error: "llm_not_implemented" });
   if (S.running) watch();
   render();
 }
