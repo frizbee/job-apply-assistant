@@ -8,21 +8,54 @@ import threading
 import time
 
 
-DEFERRED = frozenset({'manual_review', 'external_manual'})
+DEFERRED = frozenset({'manual_review', 'external_manual', 'skipped_unanswered', 'skipped_too_many_steps'})
+LIMITED = frozenset({'skipped_external_limit', 'skipped_run_limit', 'skipped_source_limit'})
+REVIEWABLE = DEFERRED | LIMITED
+LEGACY_REASONS = {
+    'skipped_unanswered': 'Form did not advance or failed validation; reopen to identify the remaining fields (legacy result)',
+    'skipped_too_many_steps': 'Form step limit reached before preview; reopen for manual input',
+}
 CURRENT = ContextVar('deferred_review', default=None)
 
 
-def queue(history, manual_file):
+def queue(history, manual_file, core=None):
     """History is authoritative: never requeue pending/uncertain/sent attempts."""
     notes = {}
     if manual_file.exists():
         with manual_file.open(encoding='utf-8', newline='') as stream:
             notes = {row['job_id']: row for row in csv.DictReader(stream) if row.get('job_id')}
-    return [dict(job_id=job_id, title=entry.get('title', ''), company=entry.get('company', ''),
+    jobs = [dict(job_id=job_id, title=entry.get('title', ''), company=entry.get('company', ''),
                  status=entry['status'], job_url=entry.get('url', ''),
-                 apply_url=notes.get(job_id, {}).get('apply_url') or entry.get('url', ''),
-                 reason=notes.get(job_id, {}).get('reason') or entry.get('reason', entry['status']))
-            for job_id, entry in history.items() if entry.get('status') in DEFERRED]
+                 category='limit' if entry['status'] in LIMITED else 'manual',
+                 apply_url=entry.get('application_url') or notes.get(job_id, {}).get('apply_url') or entry.get('url', ''),
+                 reason=('Not processed: application limit reached; eligible for a later run' if entry['status'] in LIMITED
+                         else LEGACY_REASONS.get(entry['status']) or notes.get(job_id, {}).get('reason') or entry.get('reason', entry['status'])))
+            for job_id, entry in history.items() if entry.get('status') in REVIEWABLE]
+    if core is None:
+        return jobs
+    from application_identity import application_key
+    def key_for(job_id, entry):
+        return (entry.get('application_key') or application_key(entry.get('application_url') or entry.get('url', ''), core)
+                or application_key(notes.get(job_id, {}).get('apply_url') or '', core))
+    protected = {key_for(job_id, entry) for job_id, entry in history.items()
+                 if entry.get('status', '').startswith('applied') or entry.get('status') in core.UNCERTAIN_STATUSES
+                 or entry.get('status') == 'submission_rejected'} - {None}
+    grouped = {}
+    for row in jobs:
+        key = key_for(row['job_id'], history[row['job_id']])
+        if key in protected:
+            continue
+        group_key = key or ('board:' + row['job_id'])
+        if group_key not in grouped:
+            grouped[group_key] = {**row, 'related_job_ids': [row['job_id']]}
+        else:
+            previous = grouped[group_key]
+            related = previous['related_job_ids'] + [row['job_id']]
+            if previous['category'] == 'limit' and row['category'] == 'manual':
+                grouped[group_key] = {**row, 'related_job_ids': related}
+            else:
+                previous['related_job_ids'] = related
+    return list(grouped.values())
 
 
 def authorized(job_id, previous):
@@ -143,7 +176,7 @@ def run(core, row, session):
     """Reopen exactly one selected job; normal bulk runs never enter this context."""
     from playwright.sync_api import sync_playwright
     history = core.load_applied()
-    if history.get(session.job_id, {}).get('status') not in DEFERRED:
+    if history.get(session.job_id, {}).get('status') not in REVIEWABLE:
         session.finish('history_protected_or_no_longer_deferred')
         return
     token = CURRENT.set(session)

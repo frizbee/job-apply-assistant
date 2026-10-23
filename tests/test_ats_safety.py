@@ -206,6 +206,17 @@ class BrowserBoundaryTests(SafetyTest):
         with self.assertRaises(apply.UntrustedApplicationSite):
             apply.check_ats_form(self.page, document, form, "lever")
 
+    def test_same_document_spa_navigation_to_another_ats_job_is_blocked(self):
+        url = 'https://jobs.ashbyhq.com/kraken.com/4753ccbf-68dc-4668-904f-a3156041fdc8/application'
+        self.page.goto(url)
+        document = apply.trusted_ats_document(self.page, 'ashby')
+        form = document.locator('form')
+        self.page.evaluate("history.pushState({}, '', '/kraken.com/4753ccba-68dc-4668-904f-a3156041fdc8/application')")
+        self.assertEqual(document.count(), 1)
+        with self.assertRaisesRegex(apply.UntrustedApplicationSite, 'ats_job_identity_changed'):
+            apply.check_ats_form(self.page, document, form, 'ashby')
+        self.assertEqual(self.page.locator('#email').input_value(), '')
+
     def test_native_action_and_submitter_override_are_checked(self):
         document, form = self.verified_form()
         for attr in ["action", "formaction"]:

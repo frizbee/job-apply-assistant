@@ -290,10 +290,11 @@ def start(body: dict, *, review_job_id: str | None = None) -> dict:
 
 
 def deferred_jobs() -> dict:
-    jobs = apply.deferred_review.queue(apply.load_applied(), apply.MANUAL_FILE)
+    jobs = apply.deferred_review.queue(apply.load_applied(), apply.MANUAL_FILE, apply)
     for row in jobs:
         row['can_assist'] = row['job_id'].isdigit() or apply.ats_provider(row['apply_url']) is not None
-    return {'jobs': jobs}
+    return {'jobs': jobs, 'manual_count': sum(row['category'] == 'manual' for row in jobs),
+            'limit_count': sum(row['category'] == 'limit' for row in jobs)}
 
 
 def review_action(body: dict) -> dict:
@@ -312,7 +313,7 @@ def deferred_external(body: dict, *, mark_sent: bool = False) -> dict:
             return {'error': 'review_unavailable'}
         if mark_sent:
             history = apply.load_applied()
-            if history.get(job_id, {}).get('status') not in apply.deferred_review.DEFERRED:
+            if history.get(job_id, {}).get('status') not in apply.deferred_review.REVIEWABLE:
                 return {'error': 'review_unavailable'}
             # Back up before resolving a deferred item into a protected state.
             apply.job_rechecks.backup([apply.APPLIED_FILE, apply.LOG_FILE, apply.MANUAL_FILE], apply.HOME / 'data' / 'backups')
@@ -606,6 +607,7 @@ const T = {
   question_presets_title:"Common questions: 10 reviewed answer templates", question_presets_hint:"Edit each question to match the employer's wording and enter your own confirmed answer (Yes/No for binary questions). Blank answers remain manual. Matching is exact apart from case, whitespace and the required-field asterisk. Country/company-specific questions are not generalized. Saved with this CV; no automatic Yes answers.",
   replace_prefilled_contacts:"Replace site-prefilled name, email and phone with my reviewed profile values when they differ. Check your profile carefully before enabling.",
   err_review_unavailable:"The deferred queue or selected application is unavailable.", err_invalid_review_job:"Choose a deferred application.", err_review_not_waiting:"This review step has changed. Wait for the current step.", err_invalid_review_action:"Unknown review action.",
+  deferred_manual:"Needs manual input", deferred_limits:"Not processed: run limits", review_retry:"Process this application",
   deferred_title:"Deferred applications", deferred_hint:"Incomplete forms do not stop bulk processing. Review them one at a time afterwards. The current CV/profile and Test mode checkbox above apply to assisted review. A website draft is not guaranteed to survive reopening.", refresh_deferred:"Refresh queue", review_open:"Review this application", review_external:"Open website manually", review_mark_sent:"I submitted outside the app", review_continue:"I checked this step — check and continue", review_skip:"Skip for now", review_browser_hint:"Fill the current step in Chrome, then confirm here. Do not click Submit in Chrome. Your confirmation applies only to this step; it does not save general answers. LIVE review asks for a separate final confirmation.", review_live_confirm:"LIVE review may send this one application after your final confirmation. Continue?", review_external_confirm:"This opens your regular browser outside Test mode. Any sending there is your own manual action. Continue?", review_sent_confirm:"Did you submit this application outside the app? It will be marked UNCONFIRMED and protected against retries, not counted as confirmed success.", review_unavailable:"This item is no longer available for review.",
   titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
   target_technologies:"Target technologies (one per line; advisory)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Missing target technology evidence does not block application processing. Explicit exclusions still apply to the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
@@ -636,6 +638,7 @@ const T = {
   question_presets_title:"Sık sorulan sorular: 10 onaylı yanıt şablonu", question_presets_hint:"Soruyu işverenin metnine göre düzenleyin ve onayladığınız yanıtı girin (ikili sorular için Yes/No). Boş yanıtlar manuel kalır. Eşleşme yalnızca harf boyutu, boşluk ve zorunlu alan yıldızını yok sayar. Ülkeye/şirkete özel sorular genelleştirilmez. Bu CV ile kaydedilir; otomatik Yes yanıtı yoktur.",
   replace_prefilled_contacts:"Sitenin önceden doldurduğu ad, e-posta ve telefonu farklıysa onayladığım profil değerleriyle değiştir. Etkinleştirmeden önce profilinizi dikkatlice kontrol edin.",
   err_review_unavailable:"Ertelenen kuyruk veya seçili başvuru kullanılamıyor.", err_invalid_review_job:"Ertelenen bir başvuru seçin.", err_review_not_waiting:"İnceleme adımı değişti. Geçerli adımı bekleyin.", err_invalid_review_action:"Bilinmeyen inceleme işlemi.",
+  deferred_manual:"Manuel giriş gerekiyor", deferred_limits:"İşlenmedi: çalışma limitleri", review_retry:"Bu başvuruyu işle",
   deferred_title:"Ertelenen başvurular", deferred_hint:"Eksik formlar toplu işlemi durdurmaz. Daha sonra tek tek inceleyin. Yukarıdaki güncel CV/profil ve Test modu seçimi geçerlidir. Site taslağının korunması garanti edilmez.", refresh_deferred:"Kuyruğu yenile", review_open:"Başvuruyu incele", review_external:"Siteyi manuel aç", review_mark_sent:"Uygulama dışında gönderdim", review_continue:"Bu adımı kontrol ettim — kontrol et ve devam et", review_skip:"Şimdilik atla", review_browser_hint:"Geçerli adımı Chrome'da doldurun ve burada onaylayın. Chrome'da Submit'e basmayın. Onay yalnızca bu adıma uygulanır; genel yanıt kaydetmez. CANLI modda ayrıca son onay istenir.", review_live_confirm:"CANLI inceleme, son onayınızdan sonra bu başvuruyu gönderebilir. Devam edilsin mi?", review_external_confirm:"Normal tarayıcınız Test modu dışında açılır. Buradaki gönderimler sizin manuel işleminizdir. Devam edilsin mi?", review_sent_confirm:"Bu başvuruyu uygulama dışında gönderdiniz mi? Doğrulanmamış olarak işaretlenecek ve tekrar denemeye karşı korunacaktır; doğrulanmış başarı sayılmaz.", review_unavailable:"Bu başvuru artık incelemeye uygun değil.",
   titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
   target_technologies:"Hedef teknolojiler (her satıra bir tane; bilgi amaçlı)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"Hedef teknoloji kanıtının bulunmaması başvurunun işlenmesini engellemez. Açık hariç tutmalar pozisyon başlığına veya zorunlu gereksinimlere uygulanır; isteğe bağlı becerilere uygulanmaz. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
@@ -796,13 +799,16 @@ async function refreshDeferred() {
   catch (error) { if (!uiClosed) err('review_message', {error: 'review_unavailable'}); return; }
   if (uiClosed) return;
   const root = $('deferred_jobs'); root.replaceChildren();
-  for (const job of (r.jobs || [])) {
+  for (const [category, label] of [['manual', 'deferred_manual'], ['limit', 'deferred_limits']]) {
+    const jobs = (r.jobs || []).filter(job => (job.category || 'manual') === category);
+    const heading = document.createElement('h3'); heading.textContent = t(label) + ' (' + jobs.length + ')'; root.append(heading);
+    for (const job of jobs) {
     const row = document.createElement('div'), title = document.createElement('h3'), reason = document.createElement('p');
     title.textContent = job.title + ' — ' + job.company;
-    reason.textContent = job.reason;
+    reason.textContent = job.reason + ((job.related_job_ids || []).length > 1 ? ' — ' + job.related_job_ids.length + ' listings / 1 ATS application' : '');
     row.append(title, reason);
     const open = document.createElement('button'); open.className = 'secondary';
-    open.textContent = t(job.can_assist ? 'review_open' : 'review_external');
+    open.textContent = t(job.can_assist ? (category === 'limit' ? 'review_retry' : 'review_open') : 'review_external');
     open.onclick = async () => {
       if (job.can_assist) {
         if (!$('test_mode').checked && !confirm(t('review_live_confirm'))) return;
@@ -833,6 +839,7 @@ async function refreshDeferred() {
       row.append(website);
     }
     row.append(sent); root.append(row);
+    }
   }
 }
 function showReview(review) {

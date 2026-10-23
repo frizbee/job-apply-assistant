@@ -13,6 +13,12 @@ Environment variables:
   DRY_RUN   "true" fills forms without intentionally sending applications
   HEADLESS  "true" runs without a visible browser window
 """
+
+from ats_engine import ATSEngine
+
+from form_engine import FormEngine
+
+from platforms.linkedin import LinkedInAdapter
 import csv
 import datetime as dt
 import hashlib
@@ -39,6 +45,9 @@ import job_rechecks
 import linkedin_search
 import application_answers
 import deferred_review
+import linkedin_forms
+import application_identity
+from platforms.registry import ats_adapter
 from run_metrics import RunMetrics
 
 METRICS = RunMetrics()
@@ -85,37 +94,12 @@ NARRATIVE_RE = re.compile(
     r"^\s*(describe|explain|tell (us|me)|why\b|how (do|did|would|have|will) you|"
     r"share\b|elaborate|anlat|açıkla|neden)", re.I)
 
-QUESTION_JS = r"""el => {
-  const t = s => (s || '').replace(/\s+/g, ' ').trim();
-  if (el.id) {
-    const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (l && t(l.innerText) && el.type !== 'radio') return t(l.innerText);
-  }
-  const lb = el.getAttribute('aria-labelledby');
-  if (lb) {
-    const txt = lb.split(' ').map(id => document.getElementById(id)).filter(Boolean).map(e => t(e.innerText)).join(' ');
-    if (txt) return txt;
-  }
-  const fs = el.closest('fieldset');
-  if (fs) { const lg = fs.querySelector('legend'); if (lg && t(lg.innerText)) return t(lg.innerText); }
-  // New LinkedIn form: climb to the first meaningful line if the question is unbound.
-  const noise = /^(\d+\s*\/\s*\d+.*|.*karakter|.*characters?|geçersiz giriş|invalid.*|.*zorunlu.*|.*required.*|yes|no|evet|hayır)$/i;
-  const group = el.type === 'radio' && el.name
-    ? [...document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`)] : [el];
-  const opts = new Set(group.map(r => t((r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`) || r.parentElement || {}).innerText)));
-  let p = el.parentElement;
-  for (let i = 0; i < 8 && p; i++, p = p.parentElement) {
-    if (!group.every(r => p.contains(r))) continue;
-    const lines = (p.innerText || '').split('\n').map(t).filter(l => l && !noise.test(l) && !opts.has(l));
-    if (lines.length) return lines[0].slice(0, 300);
-  }
-  return t(el.getAttribute('aria-label') || el.getAttribute('placeholder'));
-}"""
+from form_engine import QUESTION_JS
 
 
 # Only these explicit pre-submission statuses may be retried on a later run.
 RETRYABLE_STATUSES = frozenset({"modal_not_opened", "blocked", "skipped_no_button", "skipped_no_form",
-                               "skipped_unanswered", "skipped_too_many_steps", "skipped_external_limit", "pre_submission_error",
+                               "skipped_external_limit", "pre_submission_error",
                                "skipped_run_limit", "skipped_source_limit", "evaluation_passed"})
 LEGACY_UNCERTAIN_STATUSES = frozenset({"skipped_unconfirmed", "external_unconfirmed", "external_unanswered", "skipped_error"})
 UNCERTAIN_STATUSES = frozenset({"submission_pending", "submission_unconfirmed"}) | LEGACY_UNCERTAIN_STATUSES
@@ -171,6 +155,7 @@ def submission_source(source: str):
 def reset_submission_attempts() -> None:
     with ATTEMPT_LOCK:
         ATTEMPTS.update(total=0, by_source={})
+    application_identity.reset(sys.modules[__name__])
 
 
 def _submission_quota_status(source: str | None) -> str | None:
@@ -294,7 +279,12 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
     applied[job_id] = {**previous, "status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company),
                        "title": title, "company": company, "url": url or f"https://www.linkedin.com/jobs/view/{job_id}/",
                        'evaluated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'reason': status,
-                       'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
+                        'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
+    binding = application_identity.ledger(sys.modules[__name__]).bindings.get(job_id)
+    if binding:
+        applied[job_id].update(binding)
+        if 'application_alias_of' not in binding:
+            applied[job_id].pop('application_alias_of', None)
     applied[job_id].pop('metadata_diagnostic', None)
     applied[job_id].pop('technology_diagnostic', None)
     applied[job_id].pop('title_diagnostic', None)
@@ -575,10 +565,7 @@ def choose_option(question: str, options: list[str]) -> int | None:
 
 
 def question_of(el: Locator) -> str:
-    try:
-        return el.evaluate(QUESTION_JS) or ""
-    except Exception:
-        return ""
+    return FormEngine(sys.modules[__name__]).question_of(el)
 
 
 # ---------------------------------------------------------------- form filling
@@ -587,715 +574,152 @@ class UnsafeFormControl(ValueError):
     """Only the explicit final-submit path may activate a native submit control."""
 
 
-UNSAFE_SUBMIT_SELECTOR = "button:not([type='button' i]), button[formaction], input[type='submit' i], input[type='image' i]"
-NON_SUBMITTING_CONTROL_JS = r"""el => {
-    const submits = e => e && ((e.tagName === 'BUTTON' && (e.type !== 'button' || e.hasAttribute('formaction')))
-        || (e.tagName === 'INPUT' && /^(submit|image)$/i.test(e.type)));
-    if (submits(el.closest('button, input'))) return false;
-    if (submits(el.parentElement?.closest('button, input'))) return false;
-    const label = el.closest('label');
-    if (label && submits(label.control)) return false;
-    return !el.querySelector("button:not([type='button' i]), button[formaction], input[type='submit' i], input[type='image' i]");
-}"""
+from form_engine import UNSAFE_SUBMIT_SELECTOR
+from form_engine import NON_SUBMITTING_CONTROL_JS
 
 
-def click_form_control(control: Locator, timeout: int = 5000) -> None:
-    """Reject native submit actions during filling, in both test and live modes."""
-    if control.evaluate(NON_SUBMITTING_CONTROL_JS) is not True:
-        raise UnsafeFormControl("submit-capable control requires manual review")
-    # Keep the native-type restriction in the locator too: a later type change
-    # must not make a previously safe element silently become a submit button.
-    safe_selector = (f":not(:is({UNSAFE_SUBMIT_SELECTOR})):not(:is({UNSAFE_SUBMIT_SELECTOR}) *)"
-                     f":not(:has(:is({UNSAFE_SUBMIT_SELECTOR})))")
-    control.and_(control.page.locator(safe_selector)).click(timeout=timeout)
+def click_form_control(control: Locator, timeout: int=5000) -> None:
+    return FormEngine(sys.modules[__name__]).click_form_control(control, timeout)
 
 
-NAVIGATION_BUTTON_RE = re.compile(
-    r"^\s*(?:next(?:\s+step)?|continue(?:\s+to\s+(?:the\s+)?(?:next\s+step|review(?:\s+your\s+application)?))?|"
-    r"review(?:\s+(?:your\s+)?application)?|devam(?:\s+et)?|[iİıI]leri|(?:başvuruyu\s+)?(?:[iİıI]ncele|gözden\s+geç[iİıI]r))\s*$", re.I)
-FINAL_BUTTON_RE = re.compile(
-    r"^\s*(?:submit(?:\s+(?:your\s+)?application)?|send\s+(?:your\s+)?application|"
-    r"(?:başvur(?:u|unu|uyu|unuzu)\s+)?gönder)\s*$", re.I)
+from form_engine import NAVIGATION_BUTTON_RE
+from form_engine import FINAL_BUTTON_RE
 
 
 def application_button_action(button: Locator) -> str:
-    """Unknown or conflicting text/ARIA labels must never default to Next."""
-    labels = [label.strip() for label in (button.inner_text(), button.get_attribute("aria-label") or "") if label.strip()]
-    actions = {"submit" if FINAL_BUTTON_RE.fullmatch(label) else "next" if NAVIGATION_BUTTON_RE.fullmatch(label)
-               else "unknown" for label in labels}
-    return actions.pop() if len(actions) == 1 else "unknown"
+    return FormEngine(sys.modules[__name__]).application_button_action(button)
 
 
 def click_navigation(button: Locator) -> None:
-    if application_button_action(button) != "next":
-        raise UnsafeFormControl("unrecognized navigation action")
-    navigation = button.and_(button.page.get_by_role("button", name=NAVIGATION_BUTTON_RE))
-    if button.inner_text().strip():
-        navigation = navigation.filter(has_text=NAVIGATION_BUTTON_RE)
-    click_form_control(navigation)
+    return FormEngine(sys.modules[__name__]).click_navigation(button)
 
 
-RADIO_GROUP_JS = r"""fs => {
-  const t = s => (s || '').replace(/\s+/g, ' ').trim();
-  const lines = el => (el.innerText || '').split('\n').map(t).filter(Boolean);
-  const roles = [...fs.querySelectorAll('[role=radio]')];
-  const labels = roles.length
-    ? roles.map(r => lines(r).pop() || '')
-    : [...fs.querySelectorAll('input[type=radio]')].map(r => {
-        const l = r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`);
-        if (l && t(l.innerText)) return t(l.innerText);
-        // If the label is empty, use the nearest ancestor with option text.
-        let p = r.parentElement;
-        while (p && p !== fs && !t(p.innerText)) p = p.parentElement;
-        return p && p !== fs ? t(p.innerText) : '';
-      });
-  let q = '';
-  const lg = fs.querySelector('legend');
-  if (lg) q = t(lg.innerText);
-  if (!q && fs.parentElement) {
-    const own = new Set(lines(fs));
-    q = lines(fs.parentElement).find(l => !own.has(l)) || '';
-  }
-  if (!q && roles.length) q = t(roles[0].getAttribute('aria-label'));
-  return [q, labels];
-}"""
+from form_engine import RADIO_GROUP_JS
 
 
-RADIO_GROUPS = "fieldset:has(input[type='radio']):visible, [role='radiogroup']:visible"
-RADIO_SELECTION_JS = r"""root => {
-    const native = [...root.querySelectorAll('input[type=radio]')];
-    const roles = [...root.querySelectorAll('[role=radio]')];
-    const nativeState = input => {
-        const aria = input.getAttribute('aria-checked');
-        return aria === null || aria === String(input.checked) ? input.checked : null;
-    };
-    if (!roles.length) return native.map(nativeState);
-    // Do not overlook an actual submitted radio value outside the custom options.
-    if (native.some(input => !roles.some(option => option === input || option.contains(input)))) return [];
-    return roles.map(option => {
-        if (option.matches('input[type=radio]')) return nativeState(option);
-        const aria = option.getAttribute('aria-checked');
-        if (aria !== 'true' && aria !== 'false') return null;
-        const selected = aria === 'true';
-        const backing = [...option.querySelectorAll('input[type=radio]')];
-        if (backing.length > 1 || (backing.length === 1 && nativeState(backing[0]) !== selected)) return null;
-        return selected;
-    });
-}"""
+from form_engine import RADIO_GROUPS
+from form_engine import RADIO_SELECTION_JS
 
 
 def radio_choice_confirmed(states, index) -> bool:
-    """Unknown/inconsistent state is not False: require one exact, exclusive choice."""
-    return (isinstance(states, list) and type(index) is int and 0 <= index < len(states)
-            and states[index] is True and all(state is False for i, state in enumerate(states) if i != index))
+    return FormEngine(sys.modules[__name__]).radio_choice_confirmed(states, index)
 
 
 def fill_radios(scope: Locator) -> list[str]:
-    """Fill radio questions and return unresolved ones. New LinkedIn forms use
-    div[role=radio] with empty labels; older forms use legend and label[for]."""
-    unanswered: list[str] = []
-    # Preselected options also need a confirmed matching answer.
-    for fs in scope.locator(RADIO_GROUPS).all():
-        q = ""
-        try:
-            q, labels = fs.evaluate(RADIO_GROUP_JS)
-            idx = choose_option(q, labels) if q.strip() else None
-            if idx is None:
-                log(f"    ? unanswered question: {q[:90]}")
-                unanswered.append(q or "radio group")
-                continue
-            before = fs.evaluate(RADIO_SELECTION_JS)
-            if len(before) != len(labels):
-                unanswered.append(q)
-                continue
-            if not radio_choice_confirmed(before, idx):
-                items = fs.locator("[role='radio']")
-                if items.count():
-                    target = items.nth(idx)
-                    if not target.is_enabled():
-                        unanswered.append(q)
-                        continue
-                    click_form_control(target)
-                else:
-                    radio = fs.locator("input[type='radio']").nth(idx)
-                    if radio.is_disabled():
-                        unanswered.append(q)
-                        continue
-                    # Use the native control first, not an unbound text wrapper.
-                    try:
-                        radio.check(timeout=2000)
-                    except PWTimeout:
-                        # Hidden native inputs may be driven by a visible label/row.
-                        if not radio.is_checked():
-                            row = radio.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
-                            click_form_control(row)
-                            if not radio.is_checked():
-                                radio.check(force=True, timeout=2000)
-            pause(0.3, 0.7)
-            current_q, current_labels = fs.evaluate(RADIO_GROUP_JS)
-            after = fs.evaluate(RADIO_SELECTION_JS)
-            if current_q != q or current_labels != labels or len(after) != len(labels) or not radio_choice_confirmed(after, idx):
-                log(f"    ? radio selection could not be verified: {q[:90]}")
-                unanswered.append(q)
-        except Exception as e:
-            if browser_closed(e):
-                raise BrowserClosed() from None
-            log(f"    ! could not fill radio group: {e.__class__.__name__}")
-            unanswered.append(q or question_of(fs) or "radio group")
-    return unanswered
+    return FormEngine(sys.modules[__name__]).fill_radios(scope)
 
 
 # Standard external fields: (question/name/id pattern, profile key); first match wins.
-STANDARD_FIELDS = [
-    (r"first.?name|given.?name|vorname|\bad[ıi]?\b(?!.*soyad)", "first_name"),
-    (r"last.?name|surname|family.?name|soyad|nachname", "last_name"),
-    (r"full.?name|^name\b|your name|ad soyad", "full_name"),
-    (r"e-?mail", "email"),
-    (r"phone|mobile|telefon|\btel\b", "phone_intl"),
-    (r"linkedin", "linkedin"),
-    (r"github", "github"),
-    (r"website|portfolio|personal (site|url)|other url", "github"),
-    (r"current (company|employer)|^org\b| org$", "current_company"),
-    (r"current (title|position|role)", "current_title"),
-    (r"\blocation|\bcity\b|şehir|where are you (based|located)", "city"),
-]
+from form_engine import STANDARD_FIELDS
 
 
 def fill_combobox(page: Page, el: Locator, q: str) -> bool:
-    """Fill searchable Greenhouse/Ashby dropdowns (role=combobox)."""
-    std = standard_answer(el, q)
-    cands = [std] if std else answer(q)
-    if not cands:
-        return False
-    try:
-        click_form_control(el)
-        pause(0.5, 1)
-        phone_country = is_phone_country_control(el, q)
-        if std and not phone_country and application_answers.contact_kind(q) != 'country_code':
-            el.fill(std.split(",")[0])
-            pause(1.5, 2.5)
-        opts = page.locator("[role='option']:visible")
-        texts = opts.all_inner_texts()
-        if not texts:
-            el.press("Escape")
-            return False
-        if phone_country:
-            idx = application_answers.country_code_option(cands, texts)
-        else:
-            idx = choose_option(q, texts) if not std or application_answers.contact_kind(q) == 'country_code' else match_option(cands, texts)
-        if idx is None:
-            el.press("Escape")
-            return False
-        click_form_control(opts.nth(idx))
-        pause(0.3, 0.7)
-        return combobox_value_confirmed(el, q, cands)
-    except Exception as e:
-        if browser_closed(e):
-            raise BrowserClosed() from None
-        log(f"    ! could not fill dropdown: {e.__class__.__name__}")
-        return False
+    return FormEngine(sys.modules[__name__]).fill_combobox(page, el, q)
 
 
-YESNO_JS = r"""root => {
-  // Mark Ashby Yes/No button pairs and return [question, any semantic selection].
-  const t = s => (s || '').replace(/\s+/g, ' ').trim();
-  const out = [];
-  const yes = [...root.querySelectorAll('button')].filter(b => /^(yes|evet)$/i.test(t(b.innerText)));
-  for (const b of yes) {
-    const box = b.parentElement;
-    const btns = [...box.querySelectorAll('button')];
-    if (btns.length !== 2 || !/^(no|hayır)$/i.test(t(btns[1].innerText))) continue;
-    let p = box.parentElement, q = '';
-    for (let i = 0; i < 5 && p && !q; i++, p = p.parentElement)
-      q = (p.innerText || '').split('\n').map(t).find(l => l && !/^(yes|no|evet|hayır)$/i.test(l)) || '';
-    const picked = btns.some(x => ['aria-pressed', 'aria-checked', 'aria-selected'].some(a => x.getAttribute(a) === 'true'));
-    box.setAttribute('data-yesno', out.length);
-    out.push([q, picked]);
-  }
-  return out;
-}"""
+from form_engine import YESNO_JS
 
-YESNO_SELECTION_JS = r"""box => {
-    const t = s => (s || '').replace(/\s+/g, ' ').trim();
-    const buttons = [...box.querySelectorAll('button')];
-    if (buttons.length !== 2 || !/^(yes|evet)$/i.test(t(buttons[0].innerText))
-        || !/^(no|hayır)$/i.test(t(buttons[1].innerText))) return {question: '', states: []};
-    let p = box.parentElement, question = '';
-    for (let i = 0; i < 5 && p && !question; i++, p = p.parentElement)
-        question = (p.innerText || '').split('\n').map(t).find(l => l && !/^(yes|no|evet|hayır)$/i.test(l)) || '';
-    const states = buttons.map(button => {
-        const signals = ['aria-pressed', 'aria-checked', 'aria-selected'].map(a => button.getAttribute(a)).filter(v => v !== null);
-        if (!signals.length || signals.some(v => v !== 'true' && v !== 'false') || signals.some(v => v !== signals[0])) return null;
-        const selected = signals[0] === 'true';
-        const backing = [...button.querySelectorAll('input[type=radio], input[type=checkbox]')];
-        if (backing.length > 1 || (backing.length === 1 && backing[0].checked !== selected)) return null;
-        return selected;
-    });
-    return {question, states};
-}"""
+from form_engine import YESNO_SELECTION_JS
 
-CHECKGROUP_STATE_JS = r"""g => {
-  const t = s => (s || '').replace(/\s+/g, ' ').trim();
-  const label = c => {
-    const l = c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`);
-    if (l && t(l.innerText)) return t(l.innerText);
-    let p = c.parentElement;
-    while (p && !t(p.innerText)) p = p.parentElement;
-    return p ? t(p.innerText) : '';
-  };
-  const cbs = [...g.querySelectorAll('input[type=checkbox]')];
-  const opts = cbs.map(label);
-  let p = g, q = '';
-  for (let i = 0; i < 4 && p && !q; i++, p = p.parentElement)
-    q = (p.innerText || '').split('\n').map(t).find(l => l && !opts.includes(l)) || '';
-  return {question: q, options: opts,
-    states: cbs.map(c => {
-      const aria = c.getAttribute('aria-checked');
-      return c.indeterminate || (aria !== null && aria !== String(c.checked)) ? null : c.checked;
-    }),
-    disabled: cbs.map(c => c.matches(':disabled') || c.getAttribute('aria-disabled') === 'true')};
-}"""
+from form_engine import CHECKGROUP_STATE_JS
 
-CHECKGROUP_JS = r"""root => {
-  // Refresh markers: removed/restructured groups must not leave stale exemptions.
-  for (const g of root.querySelectorAll('[data-checkgroup]')) g.removeAttribute('data-checkgroup');
-  const groups = new Set();
-  for (const c of root.querySelectorAll('input[type=checkbox]')) {
-    let g = c.parentElement;
-    while (g && g !== root && g.querySelectorAll('input[type=checkbox]').length < 2) g = g.parentElement;
-    if (!g || g === root) continue;
-    groups.add(g);
-  }
-  const out = [];
-  const inspect = (""" + CHECKGROUP_STATE_JS + r""");
-  for (const g of groups) {
-    const state = inspect(g);
-    g.setAttribute('data-checkgroup', out.length);
-    out.push([state.question, state.options, state.states.some(s => s === true)]);
-  }
-  return out;
-}"""
+from form_engine import CHECKGROUP_JS
 
 
 def fill_yesno(scope: Locator) -> list[str]:
-    unanswered = []
-    for i, (q, _picked) in enumerate(scope.evaluate(YESNO_JS)):
-        idx = choose_option(q, ["Yes", "No"]) if q.strip() else None
-        if idx is None:
-            unanswered.append(q or "Yes/No question")
-            continue
-        try:
-            group = scope.locator(f"[data-yesno='{i}']")
-            before = group.evaluate(YESNO_SELECTION_JS)
-            if before.get("question") != q or len(before.get("states", [])) != 2:
-                unanswered.append(q)
-                continue
-            if not radio_choice_confirmed(before["states"], idx):
-                click_form_control(group.locator('button').nth(idx))
-            pause(0.3, 0.6)
-            after = group.evaluate(YESNO_SELECTION_JS)
-            if after.get("question") != q or len(after.get("states", [])) != 2 or not radio_choice_confirmed(after["states"], idx):
-                unanswered.append(q)
-        except Exception as e:
-            if browser_closed(e):
-                raise BrowserClosed() from None
-            unanswered.append(q)
-    return unanswered
+    return FormEngine(sys.modules[__name__]).fill_yesno(scope)
 
 
 def unconfirmed_radio_questions(scope: Locator) -> list[str]:
-    """Recheck choices after other fields/uploads, without changing any answer."""
-    issues = []
-    for group in scope.locator(RADIO_GROUPS).all():
-        q, labels = group.evaluate(RADIO_GROUP_JS)
-        idx = choose_option(q, labels) if q.strip() else None
-        states = group.evaluate(RADIO_SELECTION_JS)
-        if len(states) != len(labels) or not radio_choice_confirmed(states, idx):
-            issues.append(q or "radio group")
-    for i, (q, _picked) in enumerate(scope.evaluate(YESNO_JS)):
-        idx = choose_option(q, ['Yes', 'No']) if q.strip() else None
-        state = scope.locator(f"[data-yesno='{i}']").evaluate(YESNO_SELECTION_JS)
-        if state.get('question') != q or len(state.get('states', [])) != 2 or not radio_choice_confirmed(state['states'], idx):
-            issues.append(q or "Yes/No question")
-    # A preselected radio outside a recognized question group is not a known answer.
-    issues += scope.locator("input[type='radio'], [role='radio']").evaluate_all(r"""els => els
-        .filter(e => !e.closest("fieldset:has(input[type='radio']), [role='radiogroup']"))
-        .map(e => 'unrecognized radio group: ' + (e.name || e.id || 'unknown question'))""")
-    return issues
+    return FormEngine(sys.modules[__name__]).unconfirmed_radio_questions(scope)
 
 
 def checkbox_choices(question: str, options: list[str]) -> list[int] | None:
-    """A multi-answer is a complete set, never a best-effort subset."""
-    candidates = answer(question) if question.strip() else []
-    if not candidates:
-        return None
-    picks = [match_option([candidate], options) for candidate in candidates]
-    if any(index is None for index in picks) or len(set(picks)) != len(picks):
-        return None
-    return picks
+    return FormEngine(sys.modules[__name__]).checkbox_choices(question, options)
 
 
 def checkbox_group_confirmed(state, picks) -> bool:
-    """Require the exact exclusive set and consistent native/ARIA states."""
-    if not isinstance(state, dict) or not isinstance(picks, list) or not picks:
-        return False
-    options, states, disabled = (state.get(key) for key in ('options', 'states', 'disabled'))
-    if not all(isinstance(values, list) for values in (options, states, disabled)):
-        return False
-    if len(options) < 2 or len(states) != len(options) or len(disabled) != len(options):
-        return False
-    if any(type(index) is not int or not 0 <= index < len(options) for index in picks) or len(set(picks)) != len(picks):
-        return False
-    return all(type(off) is bool and selected is (index in picks) and (index not in picks or not off)
-               for index, (selected, off) in enumerate(zip(states, disabled)))
+    return FormEngine(sys.modules[__name__]).checkbox_group_confirmed(state, picks)
 
 
 def unconfirmed_checkbox_questions(scope: Locator) -> list[str]:
-    issues = []
-    for i, (q, options, _picked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
-        picks = checkbox_choices(q, options)
-        state = scope.locator(f"[data-checkgroup='{i}']").evaluate(CHECKGROUP_STATE_JS)
-        if (state.get('question') != q or state.get('options') != options
-                or not checkbox_group_confirmed(state, picks)):
-            issues.append(q or 'checkbox group')
-    # A group can shrink to one input after filling. Do not let that remaining
-    # value bypass verification merely because it is no longer a multi-select.
-    for cb in scope.locator("input[type='checkbox']").all():
-        if cb.is_disabled():
-            continue
-        if is_optional_follow_checkbox(cb):
-            if cb.is_checked():
-                issues.append('company follow preference was not cleared')
-            continue
-        if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
-            continue
-        q = question_of(cb)
-        pick = choose_option(q, ['Yes', 'No']) if q.strip() else None
-        state = cb.evaluate(r"""c => {
-            const aria = c.getAttribute('aria-checked');
-            return c.indeterminate || (aria !== null && aria !== String(c.checked)) ? null : c.checked;
-        }""")
-        if pick is None or state is not (pick == 0):
-            issues.append(q or 'checkbox')
-    return issues
+    return FormEngine(sys.modules[__name__]).unconfirmed_checkbox_questions(scope)
 
 
 def is_optional_follow_checkbox(cb: Locator) -> bool:
-    return (cb.get_attribute('id') == 'follow-company-checkbox'
-            or (re.fullmatch(r'Follow .+ to stay up to date with their page', question_of(cb).strip(), re.I) is not None
-                and not cb.evaluate("e => e.required || e.getAttribute('aria-required') === 'true'")))
+    label = cb.evaluate("e => [...(e.labels || [])].map(l => l.innerText || '').join(' ').trim()")
+    recognized = (cb.get_attribute('id') == 'follow-company-checkbox'
+                  or re.fullmatch(r'Follow .+ to stay up to date with their page', label if isinstance(label, str) else '', re.I) is not None
+                  or re.fullmatch(r'Follow .+ to stay up to date with their page', question_of(cb).strip(), re.I) is not None)
+    return recognized and not cb.evaluate("e => e.required || e.getAttribute('aria-required') === 'true'")
+
+
+def clear_follow_preference(cb: Locator) -> bool:
+    """LinkedIn hides the native input; its visible, non-submitting label drives it."""
+    if not cb.is_checked():
+        return True
+    try:
+        if cb.is_visible():
+            cb.set_checked(False, timeout=1500)
+        else:
+            label = cb.locator('xpath=ancestor::label[1]')
+            control_id = cb.get_attribute('id')
+            if control_id:
+                # Filter by DOM association, not CSS interpolation of an opaque ID.
+                labels = cb.page.locator('label').all()
+                matching = [item for item in labels if item.get_attribute('for') == control_id]
+                if len(matching) == 1:
+                    label = matching[0]
+            if label.count() != 1:
+                return False
+            click_form_control(label)
+        return not cb.is_checked()
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        return False
 
 
 def fill_checkgroups(scope: Locator) -> list[str]:
-    """Select a complete confirmed set, then verify the whole group, not just the last click."""
-    unanswered = []
-    for i, (q, opts, _any_checked) in enumerate(scope.evaluate(CHECKGROUP_JS)):
-        picks = checkbox_choices(q, opts)
-        if picks is None:
-            unanswered.append(q or 'checkbox group')
-            continue
-        group = scope.locator(f"[data-checkgroup='{i}']")
-        try:
-            state = group.evaluate(CHECKGROUP_STATE_JS)
-            if (state.get('question') != q or state.get('options') != opts
-                    or len(state.get('states', [])) != len(opts)
-                    or any(type(value) is not bool for value in state['states'])
-                    or len(state.get('disabled', [])) != len(opts)
-                    or any(state['disabled'][index] for index in picks)):
-                unanswered.append(q or 'checkbox group')
-                continue
-            for index in range(len(opts)):
-                state = group.evaluate(CHECKGROUP_STATE_JS)
-                if state.get('question') != q or state.get('options') != opts:
-                    raise ValueError('checkbox options changed during selection')
-                wanted = index in picks
-                cb = group.locator("input[type='checkbox']").nth(index)
-                if cb.is_checked() == wanted:
-                    continue
-                if cb.is_disabled() or cb.evaluate(NON_SUBMITTING_CONTROL_JS) is not True:
-                    raise UnsafeFormControl('unsafe or disabled checkbox control')
-                try:
-                    cb.set_checked(wanted, timeout=2000)
-                except PWTimeout:
-                    if cb.is_checked() != wanted:
-                        # Hidden native inputs may have a working visible label/row.
-                        row = cb.locator("xpath=ancestor::*[normalize-space(.)!=''][1]")
-                        click_form_control(row, timeout=2000)
-                        if cb.is_checked() != wanted:
-                            cb.set_checked(wanted, force=True, timeout=2000)
-            state = group.evaluate(CHECKGROUP_STATE_JS)
-            if (state.get('question') != q or state.get('options') != opts
-                    or not checkbox_group_confirmed(state, picks)):
-                unanswered.append(q or 'checkbox group')
-        except Exception as e:
-            if browser_closed(e):
-                raise BrowserClosed() from None
-            log(f"    ! checkbox selection unconfirmed: {e.__class__.__name__}")
-            unanswered.append(q or 'checkbox group')
-    return unanswered
+    return FormEngine(sys.modules[__name__]).fill_checkgroups(scope)
 
 
 def standard_answer(el: Locator, q: str) -> str | None:
-    """Resolve standard external fields such as name, email and phone."""
-    if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
-        return None
-    if is_phone_country_control(el, q):
-        return PROFILE.get('country_code') or None
-    kind = application_answers.contact_kind(q)
-    if kind == 'country_code':
-        return PROFILE.get('country_code') or None
-    if kind == 'phone':
-        separate_code = el.evaluate(r"""e => {
-            const root = e.closest('form') || e.closest('[role=dialog]');
-            return root && [...root.querySelectorAll('select,[role=combobox]')].some(c =>
-                (c.id === 'country' && e.id === 'phone' && e.type === 'tel') ||
-                /country (calling )?code/i.test(c.getAttribute('aria-label') || [...(c.labels || [])].map(l=>l.textContent).join(' ')));
-        }""")
-        return PROFILE.get('phone' if separate_code is True else 'phone_intl') or None
-    key = " ".join([q, el.get_attribute("name") or "", el.get_attribute("id") or "",
-                    el.get_attribute("autocomplete") or ""]).lower()
-    for pattern, field in STANDARD_FIELDS:
-        if re.search(pattern, key):
-            return PROFILE.get(field) or None
-    return None
+    return FormEngine(sys.modules[__name__]).standard_answer(el, q)
 
 
 def is_phone_country_control(el: Locator, question: str) -> bool:
-    if application_answers.question_key(question) != 'country':
-        return False
-    return el.evaluate("e => e.id === 'country' && e.getAttribute('role') === 'combobox' && !!e.closest('form')?.querySelector('#phone[type=tel]')") is True
+    return FormEngine(sys.modules[__name__]).is_phone_country_control(el, question)
 
 
 def combobox_value_confirmed(el: Locator, question: str, candidates: list[str]) -> bool:
-    # React-select clears the search input after choosing. Verify the displayed
-    # single value in this control, never an option elsewhere on the page.
-    selected = el.evaluate("e => e.closest('.select__control')?.querySelector('.select__single-value')?.textContent || ''")
-    if not selected:
-        return text_value_confirmed(el.input_value(), candidates, question=question)
-    if is_phone_country_control(el, question) or application_answers.contact_kind(question) == 'country_code':
-        return application_answers.country_code_option(candidates, [selected]) == 0
-    return match_option(candidates, [selected]) == 0
+    return FormEngine(sys.modules[__name__]).combobox_value_confirmed(el, question, candidates)
 
 
-TEXT_FIELDS = (
-    "input[type='text']:visible:not([aria-hidden='true']), input[type='tel']:visible:not([aria-hidden='true']), input[type='email']:visible:not([aria-hidden='true']), "
-    "input[type='number']:visible:not([aria-hidden='true']), input[type='url']:visible:not([aria-hidden='true']), input[type='date']:visible:not([aria-hidden='true']), "
-    "input:not([type]):visible:not([aria-hidden='true']), textarea:visible:not([aria-hidden='true'])"
-)
+from form_engine import TEXT_FIELDS
 
 
 def text_field_candidates(el: Locator, q: str, *, external: bool) -> list[str]:
-    # An exact user-confirmed answer also overrides generic identity-field rules.
-    if any(key.strip().casefold() == q.strip().casefold() for key in CFG.get('confirmed_answers', {})):
-        return answer(q, numeric=el.get_attribute('type') == 'number')
-    if application_answers.preset_answer(q, SETTINGS):
-        return answer(q, numeric=el.get_attribute('type') == 'number')
-    kind = application_answers.contact_kind(q)
-    if kind and not external:
-        return answer(q)
-    std = standard_answer(el, q) if external else None
-    if std:
-        return [std]
-    numeric = el.get_attribute('type') == 'number' or 'numeric' in (el.get_attribute('id') or '')
-    return answer(q, numeric=numeric)
+    return FormEngine(sys.modules[__name__]).text_field_candidates(el, q, external=external)
 
 
-def text_value_confirmed(value: str, candidates: list[str], *, numeric: bool = False, question: str = '') -> bool:
-    """Accept only a known value, not merely nonempty/native-valid text."""
-    value = value.replace('\r\n', '\n').strip()
-    if not value:
-        return False
-    kind = application_answers.contact_kind(question)
-    if kind == 'email':
-        return any(value.casefold() == candidate.strip().casefold() for candidate in candidates)
-    if kind == 'phone' and re.fullmatch(r'[+\d\s().-]+', value):
-        return any(re.fullmatch(r'[+\d\s().-]+', candidate) and re.sub(r'\D', '', value) == re.sub(r'\D', '', candidate)
-                   for candidate in candidates)
-    if numeric:
-        number = re.compile(r'\d+(?:\.\d+)?')
-        return bool(number.fullmatch(value)) and any(
-            number.fullmatch(candidate.strip()) and Decimal(value) == Decimal(candidate.strip())
-            for candidate in candidates)
-    return any(value == candidate.replace('\r\n', '\n').strip() for candidate in candidates)
+def text_value_confirmed(value: str, candidates: list[str], *, numeric: bool=False, question: str='') -> bool:
+    return FormEngine(sys.modules[__name__]).text_value_confirmed(value, candidates, numeric=numeric, question=question)
 
 
 def unconfirmed_text_questions(scope: Locator, *, external: bool) -> list[str]:
-    """Read values again after other fields/uploads; never silently repair prefills."""
-    issues = []
-    for el in scope.locator(TEXT_FIELDS).all():
-        if el.is_disabled():
-            continue  # Disabled controls are not submitted by native forms.
-        q = question_of(el)
-        candidates = text_field_candidates(el, q, external=external)
-        if external and el.get_attribute('role') == 'combobox':
-            confirmed = combobox_value_confirmed(el, q, candidates)
-        else:
-            confirmed = text_value_confirmed(el.input_value(), candidates, numeric=el.get_attribute('type') == 'number', question=q)
-        if not confirmed:
-            issues.append(q or 'text field')
-    return issues
+    return FormEngine(sys.modules[__name__]).unconfirmed_text_questions(scope, external=external)
 
 
-FORM_VALUES_JS = """root => [...root.querySelectorAll('input,select,textarea')].map(e =>
-    [e.tagName, e.type, e.name, e.value, e.checked, e.files ? [...e.files].map(f=>f.name) : null])"""
+from form_engine import FORM_VALUES_JS
 
 
-def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
-    """Count actual form access/changed values without logging personal values."""
-    METRICS.mark('forms_opened')
-    if external:
-        ensure_application_scope(modal)
-    try:
-        before = modal.evaluate(FORM_VALUES_JS)
-    except Exception:
-        before = None
-    result = _fill_step(page, modal, external)
-    if before is not None:
-        try:
-            after = modal.evaluate(FORM_VALUES_JS)
-            if after != before:
-                METRICS.mark('forms_changed')
-        except Exception:
-            pass  # Observability must not change filling or safety decisions.
-    return result
+def fill_step(page: Page, modal: Locator, external: bool=False) -> list[str]:
+    return FormEngine(sys.modules[__name__]).fill_step(page, modal, external)
 
 
-def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
-    """Fill empty fields and verify answers; nonempty text is not confirmation."""
-    unanswered: list[str] = []
-    if external:
-        ensure_application_scope(modal)
-    # Text fields.
-    fields = modal.locator(TEXT_FIELDS)
-    if external:
-        controls = stable_application_controls(modal, TEXT_FIELDS)
-    else:
-        controls = [(el, None) for el in fields.all()]
-    for el, expected_question in controls:
-        try:
-            if external:
-                ensure_application_scope(modal, el, question=expected_question)
-            if not el.is_editable(timeout=2000):
-                continue
-            q = question_of(el)
-            if external and q != expected_question:
-                raise ApplicationFormChanged('application_field_question_changed')
-            cands = text_field_candidates(el, q, external=external)
-            numeric = el.get_attribute('type') == 'number'
-            if external and el.get_attribute('role') == 'combobox':
-                if not combobox_value_confirmed(el, q, cands) and not fill_combobox(page, el, q):
-                    unanswered.append(q)
-                continue
-            if el.input_value().strip():
-                if text_value_confirmed(el.input_value(), cands, numeric=numeric, question=q):
-                    continue
-                replace_contact = (SETTINGS.get('replace_prefilled_contacts') is True
-                                   and application_answers.contact_kind(q) in ('first_name', 'last_name', 'full_name', 'email', 'phone')
-                                   and bool(cands))
-                if not replace_contact:
-                    unanswered.append(q or 'text field')
-                    continue
-                log('    .. replacing a prefilled contact with the reviewed profile value (enabled in GUI)')
-            if not cands:
-                log(f"    ? unanswered question: {q[:90]}")
-                unanswered.append(q)
-                continue
-            el.fill(cands[0])
-            pause(0.6, 1.2)
-            # Never select the first typeahead suggestion without a matching answer.
-            sugg = page.locator("[role='listbox'] [role='option']:visible")
-            if sugg.count():
-                idx = match_option(cands, sugg.all_inner_texts())
-                if idx is None:
-                    unanswered.append(q)
-                else:
-                    click_form_control(sugg.nth(idx))
-            if not text_value_confirmed(el.input_value(), cands, numeric=numeric, question=q):
-                unanswered.append(q or 'text field')
-        except Exception as e:
-            if isinstance(e, ApplicationFormChanged):
-                raise
-            if browser_closed(e):
-                raise BrowserClosed() from None
-            if external:
-                ensure_application_scope(modal, el, question=expected_question)
-            try:
-                q = question_of(el)[:70]
-            except Exception:
-                q = "?"
-            log(f"    ! field could not be filled ({e.__class__.__name__}): {q}")
-            unanswered.append(q or "text field")
-
-    # Native dropdowns.
-    if external:
-        ensure_application_scope(modal)
-    for sel in modal.locator("select:visible").all():
-        try:
-            options = sel.locator("option").all_inner_texts()
-            idx = choose_option(question_of(sel), options)
-            if idx is not None:
-                sel.select_option(index=idx)
-                if (sel.locator('option').all_inner_texts() != options
-                        or sel.evaluate('e => e.selectedIndex') != idx):
-                    unanswered.append(question_of(sel) or 'select value changed')
-            else:
-                unanswered.append(question_of(sel) or "select")
-        except Exception as e:
-            log(f"    ! could not fill select: {e.__class__.__name__}")
-            unanswered.append(question_of(sel) or "select")
-
-    unanswered += fill_radios(modal)
-
-    unanswered += fill_checkgroups(modal)
-    # Consent and attestations require an explicit question-specific rule.
-    for cb in modal.locator("input[type='checkbox']:visible").all():
-        if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
-            continue
-        if is_optional_follow_checkbox(cb):
-            cb.set_checked(False)
-            continue
-        q = question_of(cb)
-        idx = choose_option(q, ["Yes", "No"])
-        if idx is None:
-            unanswered.append(q or "checkbox")
-            continue
-        try:
-            cb.set_checked(idx == 0)
-        except Exception:
-            unanswered.append(q or "checkbox")
-
-    resume = HOME / PROFILE["resume_file"]
-    if external:
-        ensure_application_scope(modal)
-        unanswered += fill_yesno(modal)
-        # Upload the CV on external forms; skip cover-letter file inputs.
-        for fi, expected_question in stable_application_controls(modal, "input[type='file']"):
-            ensure_application_scope(modal, fi, question=expected_question)
-            if question_of(fi) != expected_question:
-                raise ApplicationFormChanged('application_upload_question_changed')
-            key = (question_of(fi) + " " + (fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")).lower()
-            if re.search(r"cover", key) or not resume.exists():
-                continue
-            if re.search(r"resume|\bcv\b|lebenslauf|özgeçmiş", key) or modal.locator("input[type='file']").count() == 1:
-                try:
-                    if fi.evaluate('(e, name) => e.files.length === 1 && e.files[0].name === name', resume.name):
-                        continue
-                    fi.set_input_files(str(resume))
-                    pause(2, 3)
-                except Exception as e:
-                    log(f"    ! could not upload CV: {e.__class__.__name__}")
-                    unanswered.append("resume upload")
-        return unanswered
-
-    # Upload the selected CV if it is not listed on LinkedIn (uploads are auto-selected).
-    if resume.exists() and modal.locator("input[type='file']").count():
-        if resume.name.lower() not in modal.inner_text().lower():
-            try:
-                modal.locator("input[type='file']").first.set_input_files(str(resume))
-                pause(2, 3)
-            except Exception:
-                unanswered.append("resume upload")
-    return unanswered
+def _fill_step(page: Page, modal: Locator, external: bool=False) -> list[str]:
+    return FormEngine(sys.modules[__name__])._fill_step(page, modal, external)
 
 
 MODAL = "dialog[open], div[role='dialog']"
@@ -1303,10 +727,7 @@ DISCARD_RE = re.compile(r"^(discard|sil|vazgeç)$", re.I)
 
 
 def has_errors(modal: Locator) -> bool:
-    return modal.locator(
-        "[aria-invalid='true']:visible, [role='alert']:visible, "
-        ".artdeco-inline-feedback--error:visible, [data-test-form-element-error-messages]:visible"
-    ).count() > 0
+    return FormEngine(sys.modules[__name__]).has_errors(modal)
 
 
 def discard(page: Page) -> None:
@@ -1327,52 +748,15 @@ LINKEDIN_SENT_RE = re.compile(
 
 
 def linkedin_submission_signals(page: Page) -> set[str]:
-    """Explicit confirmation lines only, not generic 'thanks' or job descriptions."""
-    texts = page.locator(
-        "dialog[open]:visible, [role='dialog']:visible, .artdeco-toast-item:visible, [role='status']:visible"
-    ).all_inner_texts()
-    return {line.strip().casefold() for text in texts for line in text.splitlines()
-            if LINKEDIN_SENT_RE.fullmatch(line.strip())}
+    return LinkedInAdapter(sys.modules[__name__]).linkedin_submission_signals(page)
 
 
-def wait_linkedin_submission(page: Page, modal: Locator, before: set[str], timeout_seconds: float = 25,
-                             expected_url: str | None = None) -> str:
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        if expected_url is not None and page.url != expected_url:
-            return "submission_unconfirmed"
-        # A pre-existing toast or a closed modal alone is not proof of submission.
-        if linkedin_submission_signals(page) - before:
-            return "applied"
-        if modal.locator(
-            "[aria-invalid='true']:visible, .artdeco-inline-feedback--error:visible, "
-            "[data-test-form-element-error-messages]:visible"
-        ).count():
-            return "submission_rejected"
-        alerts = modal.locator("[role='alert']:visible").all_inner_texts()
-        if any(re.search(r"error|failed|unable|could not|something went wrong|required|try again|hata|zorunlu", a, re.I)
-               for a in alerts):
-            return "submission_unconfirmed"
-        if time.monotonic() >= deadline:
-            return "submission_unconfirmed"
-        pause(0.5, 0.5)
+def wait_linkedin_submission(page: Page, modal: Locator, before: set[str], timeout_seconds: float=25, expected_url: str | None=None) -> str:
+    return LinkedInAdapter(sys.modules[__name__]).wait_linkedin_submission(page, modal, before, timeout_seconds, expected_url)
 
 
-def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str,
-                    title: str, company: str, applied: dict | None = None) -> str:
-    if STOP.is_set():
-        raise Stopped
-    expected_url = page.url
-    before = linkedin_submission_signals(page)
-    url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-    status = submit_application(page, primary, job_id, title, company, url,
-        lambda: wait_linkedin_submission(page, modal, before, expected_url=expected_url), applied)
-    if status == "applied":
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-    return status
+def submit_linkedin(page: Page, modal: Locator, primary: Locator, job_id: str, title: str, company: str, applied: dict | None=None) -> str:
+    return LinkedInAdapter(sys.modules[__name__]).submit_linkedin(page, modal, primary, job_id, title, company, applied)
 
 
 def submit_application(page: Page, primary: Locator, job_id: str, title: str, company: str,
@@ -1380,6 +764,13 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
     """Durably track every intentional final submit, even on timeout/STOP/crash."""
     if STOP.is_set():
         raise Stopped
+    identity = application_identity.application_key(url, sys.modules[__name__])
+    if identity:
+        existing = applied if applied is not None else load_applied()
+        blocker = application_identity.ledger(sys.modules[__name__]).submit_blocker(identity, job_id, existing, sys.modules[__name__])
+        if blocker:
+            return blocker
+        application_identity.ledger(sys.modules[__name__]).bindings[job_id] = {'application_key': identity, 'application_url': url}
     if DRY_RUN:
         return preview_application(job_id)  # Defense in depth, including the preview budget.
     state = applied if applied is not None else load_applied()
@@ -1452,111 +843,19 @@ APPLICATION_SENT_RE = re.compile(
 
 
 def application_submission_signals(page: Page) -> set[str]:
-    texts = page.locator("[role='dialog']:visible, [role='status']:visible, [role='alert']:visible, "
-        "main h1:visible, main h2:visible, [data-testid='application-confirmation']:visible").all_inner_texts()
-    return {line.strip().casefold() for text in texts for line in text.splitlines()
-            if APPLICATION_SENT_RE.fullmatch(line.strip())}
+    return ATSEngine(sys.modules[__name__]).application_submission_signals(page)
 
 
-def wait_application_submission(page: Page, before: set[str], checks: int = 25,
-                                 expected_host: str | None = None) -> str:
-    for _ in range(checks):
-        if expected_host is not None and urlparse(page.url).hostname != expected_host:
-            return "submission_unconfirmed"
-        if application_submission_signals(page) - before:
-            return "applied"
-        if page.locator("[aria-invalid='true']:visible, [class*='error' i]:visible:has-text('required')").count():
-            return "submission_rejected"
-        if page.locator(CAPTCHA_SEL).count():
-            return "submission_unconfirmed"
-        pause(1, 1)
-    return "submission_unconfirmed"
+def wait_application_submission(page: Page, before: set[str], checks: int=25, expected_host: str | None=None) -> str:
+    return ATSEngine(sys.modules[__name__]).wait_application_submission(page, before, checks, expected_host)
 
 
-def apply_to_job(page: Page, job_id: str, title: str = "", company: str = "", applied: dict | None = None) -> str:
-    btn = page.get_by_role("button", name=EASY_APPLY_RE).first
-    if not btn.count():
-        return "no_easy_apply"
-    try:
-        click_form_control(btn)
-    except UnsafeFormControl:
-        record_manual(job_id, title, company, page.url, "submit-capable Easy Apply opener")
-        return "manual_review"
-    modal = page.locator(MODAL).first
-    try:
-        modal.wait_for(timeout=10000)
-        modal.locator("footer button").first.wait_for(timeout=20000)  # Wait for the form-loading spinner.
-    except PWTimeout:
-        screenshot(page, f"{job_id}_notloaded")
-        discard(page)
-        return "modal_not_opened"
+def apply_to_job(page: Page, job_id: str, title: str='', company: str='', applied: dict | None=None) -> str:
+    return LinkedInAdapter(sys.modules[__name__]).apply_to_job(page, job_id, title, company, applied)
 
-    for _ in range(15):
-        pause(1, 2)
-        unanswered = fill_step(page, modal)
-        if require_manual_review(page, modal, unanswered, job_id, title, company):
-            discard(page)
-            return "manual_review"
-        follow = modal.locator("input#follow-company-checkbox:checked")
-        if follow.count():
-            try:
-                click_form_control(modal.locator("label[for='follow-company-checkbox']"))
-            except UnsafeFormControl:
-                require_manual_review(page, modal, ["unsafe follow-company control"], job_id, title, company)
-                discard(page)
-                return "manual_review"
 
-        primary = modal.locator("footer button:visible").last
-        if not primary.count():
-            screenshot(page, f"{job_id}_nobutton")
-            discard(page)
-            return "skipped_no_button"
-        action = application_button_action(primary)
-
-        if action == "submit":
-            if DRY_RUN:
-                screenshot(page, f"{job_id}_dryrun")
-                discard(page)
-                return preview_application(job_id)
-            return submit_linkedin(page, modal, primary, job_id, title, company, applied)
-
-        if action != "next":
-            require_manual_review(page, modal, ["unrecognized application action"], job_id, title, company)
-            discard(page)
-            return "manual_review"
-
-        before = modal.inner_text()
-        try:
-            click_navigation(primary)
-        except UnsafeFormControl:
-            require_manual_review(page, modal, ["submit-capable navigation control"], job_id, title, company)
-            discard(page)
-            return "manual_review"
-        pause(1.5, 3)
-        if has_errors(modal) or modal.inner_text() == before:
-            unanswered = fill_step(page, modal)  # Retry filling once.
-            if require_manual_review(page, modal, unanswered, job_id, title, company):
-                discard(page)
-                return "manual_review"
-            # This locator may now refer to a different step's final button.
-            # Re-enter the guarded branch instead of treating it as old Next.
-            if application_button_action(primary) != "next":
-                continue
-            try:
-                click_navigation(primary)
-            except UnsafeFormControl:
-                require_manual_review(page, modal, ["submit-capable navigation control"], job_id, title, company)
-                discard(page)
-                return "manual_review"
-            pause(1.5, 3)
-            if has_errors(modal) or modal.inner_text() == before:
-                screenshot(page, f"{job_id}_unanswered")
-                discard(page)
-                return "skipped_unanswered"
-
-    screenshot(page, f"{job_id}_toolong")
-    discard(page)
-    return "skipped_too_many_steps"
+def linkedin_navigation_issues(form: Locator) -> list[str]:
+    return LinkedInAdapter(sys.modules[__name__]).linkedin_navigation_issues(form)
 
 
 # ---------------------------------------------------------------- external (company sites)
@@ -1577,26 +876,12 @@ class ApplicationFormChanged(UntrustedApplicationSite):
     """A field/form was replaced while filling; never reuse positional locators."""
 
 
-def ensure_application_scope(scope: Locator, field: Locator | None = None, *, question: str = '') -> None:
-    if scope.count() != 1 or (field is not None and field.count() != 1):
-        raise ApplicationFormChanged('application_form_changed_during_fill' + (': ' + question[:120] if question else ''))
+def ensure_application_scope(scope: Locator, field: Locator | None=None, *, question: str='') -> None:
+    return ATSEngine(sys.modules[__name__]).ensure_application_scope(scope, field, question=question)
 
 
 def stable_application_controls(scope: Locator, selector: str):
-    """Bind controls by unique native IDs, or by per-node tokens as a fallback."""
-    token = secrets.token_hex(12)
-    script = """(es, token) => es.map((e,i) => {
-        let selector;
-        if (e.id && document.querySelectorAll('#'+CSS.escape(e.id)).length === 1) {
-            selector = '#'+CSS.escape(e.id);
-        } else {
-            e.setAttribute('data-autoapply-field', token+'-'+i);
-            selector = '[data-autoapply-field="'+token+'-'+i+'"]';
-        }
-        return {selector, question: (""" + QUESTION_JS + """)(e)};
-    })"""
-    return [(scope.locator(entry['selector']), entry['question'])
-            for entry in scope.locator(selector).evaluate_all(script, token)]
+    return ATSEngine(sys.modules[__name__]).stable_application_controls(scope, selector)
 
 
 def safe_https_url(url: str) -> bool:
@@ -1621,49 +906,11 @@ def ats_provider(url: str) -> str | None:
 
 
 def trusted_ats_document(page: Page, ats: str) -> Locator:
-    """Bind all data-entry locators to one verified document, not future navigations.
-
-    Checking page.url alone is racy: Playwright can wait for an element on a new,
-    untrusted page. A random document marker prevents that selector from matching.
-    """
-    url = page.url
-    if ats not in ATS or ats_provider(url) != ats:
-        raise UntrustedApplicationSite("untrusted_redirect")
-    token = secrets.token_hex(16)
-    try:
-        marked = page.evaluate("""({url, token}) => {
-            if (window.location.href !== url) return false;
-            document.documentElement.setAttribute('data-autoapply-document', token);
-            return true;
-        }""", {"url": url, "token": token})
-    except Exception as e:
-        if browser_closed(e):
-            raise BrowserClosed() from None
-        raise UntrustedApplicationSite("cannot_verify_document") from e
-    if marked is not True:
-        raise UntrustedApplicationSite("document_changed")
-    return page.locator(f'html[data-autoapply-document="{token}"]')
+    return ATSEngine(sys.modules[__name__]).trusted_ats_document(page, ats)
 
 
 def check_ats_form(page: Page, document: Locator, form: Locator, ats: str) -> None:
-    if ats not in ATS or ats_provider(page.url) != ats or document.count() != 1:
-        raise UntrustedApplicationSite("document_changed_or_untrusted_redirect")
-    # Check native form targets, including submitter overrides and controls whose
-    # form= attribute references a different form. JS API requests remain ATS code.
-    try:
-        targets = form.evaluate("""root => {
-            const controls = [...root.querySelectorAll('input, button, select, textarea')];
-            const forms = new Set(root.matches('form') ? [root] : root.querySelectorAll('form'));
-            for (const el of controls) if (el.form) forms.add(el.form);
-            return [...forms].map(f => f.action || window.location.href).concat(
-                controls.filter(e => e.hasAttribute('formaction')).map(e => e.formAction));
-        }""")
-    except Exception as e:
-        if browser_closed(e):
-            raise BrowserClosed() from None
-        raise UntrustedApplicationSite("cannot_verify_form_targets") from e
-    if any(ats_provider(target) != ats for target in targets):
-        raise UntrustedApplicationSite("untrusted_form_target")
+    return ATSEngine(sys.modules[__name__]).check_ats_form(page, document, form, ats)
 
 
 APPLY_BTN_RE = re.compile(r"\bapply\b|başvur", re.I)
@@ -1718,99 +965,19 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
 
 
 def native_form_issues(form: Locator) -> list[str]:
-    """Native/ARIA validity still applies to user-assisted, explicitly reviewed steps."""
-    issues = form.locator(
-            "input, textarea, select, [aria-required='true']:visible"
-        ).evaluate_all(r"""els => els.filter(e => {
-            if (e.disabled || e.readOnly || e.type === 'hidden') return false;
-            if (e.validity && !e.validity.valid) return true;
-            if (e.getAttribute('aria-invalid') === 'true') return true;
-            if (e.getAttribute('aria-required') !== 'true') return false;
-            if (e.type === 'checkbox' || e.type === 'radio') return !e.checked;
-            if (e.type === 'file') return !e.files.length;
-            if (e.getAttribute('role') === 'radiogroup')
-                return !e.querySelector('[aria-checked="true"], input:checked');
-            if ('value' in e) return !e.value.trim();
-            return !e.getAttribute('aria-valuetext');
-        }).map(e => e.getAttribute('aria-label') || e.name || e.id || 'invalid required field')""")
-    return issues
+    return FormEngine(sys.modules[__name__]).native_form_issues(form)
 
 
 def external_url(page: Page) -> str | None:
-    """Follow LinkedIn's external Apply action and return the company-site URL."""
-    btn = page.get_by_role("button", name=APPLY_BTN_RE).or_(page.get_by_role("link", name=APPLY_BTN_RE))
-    return follow_apply(page, btn.filter(has_not_text=EASY_APPLY_RE).first)
+    return LinkedInAdapter(sys.modules[__name__]).external_url(page)
 
 
 def follow_apply(page: Page, btn: Locator) -> str | None:
-    """Click Apply and return the destination URL from navigation or a new tab."""
-    if not btn.count():
-        return None
-    ctx = page.context
-    before, start = len(ctx.pages), page.url
-    try:
-        click_form_control(btn)
-    except UnsafeFormControl:
-        return None
-    for _ in range(30):
-        time.sleep(0.5)
-        if page.url != start and urlparse(page.url).netloc != urlparse(start).netloc:
-            url = page.url
-            page.go_back(wait_until="domcontentloaded")
-            return url
-        if len(ctx.pages) > before:
-            new = ctx.pages[-1]
-            try:
-                new.wait_for_load_state("domcontentloaded", timeout=20000)
-                pause(2, 3)
-            except PWTimeout:
-                pass
-            url = new.url
-            new.close()
-            return url
-        # Intermediate "Share your profile / Continue" dialog.
-        cont = page.locator(MODAL).get_by_role("button", name=re.compile(r"continue|devam", re.I))
-        if cont.count():
-            try:
-                click_form_control(cont.first)
-            except UnsafeFormControl:
-                return None
-    return None
+    return ATSEngine(sys.modules[__name__]).follow_apply(page, btn)
 
 
 def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
-    """Find a direct application URL/provider, including embedded company-site forms."""
-    name = ats_provider(url)
-    if not name:
-        if not safe_https_url(url):
-            return None, "unknown"
-        # Discover an approved Greenhouse/Ashby/Lever iframe on the company site.
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            pause(3, 4)
-        except Exception:
-            return None, "unknown"
-        if not safe_https_url(page.url):
-            return None, "unknown"
-        name = ats_provider(page.url)
-        if name:
-            url = page.url
-        else:
-            for fr in page.frames:
-                name = ats_provider(fr.url)
-                if name:
-                    url = fr.url
-                    break
-            else:
-                return None, "unknown"
-    parsed = urlparse(url)
-    path = parsed.path.rstrip("/")
-    if name == "lever" and not path.endswith("/apply"):
-        path += "/apply"
-    elif name == "ashby" and not path.endswith("/application"):
-        path += "/application"
-    url = parsed._replace(path=path or "/").geturl()
-    return url, name
+    return ATSEngine(sys.modules[__name__]).ats_apply_url(page, url)
 
 
 EXT_STATE = {"count": 0, "last": 0.0}
@@ -1823,155 +990,29 @@ def apply_external(page: Page, job_id: str, title: str, company: str, applied: d
     return apply_form(page, job_id, title, company, url, applied)
 
 
-def apply_form(page: Page, job_id: str, title: str, company: str, url: str, applied: dict | None = None) -> str:
-    """Process a company-site form with a per-run quota and inter-attempt cooldown."""
-    ext = CFG["external"]
-    if not EXTERNAL:
-        record_manual(job_id, title, company, url, "external_disabled")
-        return "external_manual"
-    denied = submission_quota_status(source_for_job(job_id))
-    if denied:
-        return denied
-    if EXT_STATE["count"] >= ext.get("max_per_run", 5):
-        return "skipped_external_limit"  # May be retried on the next run.
-    form_url, ats = ats_apply_url(page, url)
-    if not form_url:
-        record_manual(job_id, title, company, url, "unsupported_site")
-        return "external_manual"
-    wait = EXT_STATE["last"] + ext.get("min_wait_seconds", 120) - time.time()
-    if wait > 0:
-        log(f"  .. waiting {int(wait)} seconds before the next company form")
-        pause(wait, wait)
-    EXT_STATE["count"] += 1
-    EXT_STATE["last"] = time.time()
-    log(f"  -> {ats}: {form_url[:90]}")
-    page.goto(form_url, wait_until="domcontentloaded", timeout=30000)
-    pause(3, 5)
-    try:
-        return apply_trusted_form(page, job_id, title, company, form_url, ats, applied)
-    except (UntrustedApplicationSite, UnsafeFormControl) as e:
-        log(f"  ! unsafe application site/action: {e}")
-        record_manual(job_id, title, company, url, str(e))
-        return "external_manual"
+def apply_form(page: Page, job_id: str, title: str, company: str, url: str, applied: dict | None=None) -> str:
+    return ATSEngine(sys.modules[__name__]).apply_form(page, job_id, title, company, url, applied)
 
 
-def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_url: str, ats: str,
-                       applied: dict | None = None) -> str:
-    document = trusted_ats_document(page, ats)
-    if ats == "ashby":
-        tab = document.get_by_role("tab", name=re.compile(r"application", re.I))
-        if tab.count():
-            click_form_control(tab.first)
-            pause(1.5, 2.5)
-    form = document.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
-    if not form.count():
-        form = document.locator("body")
-
-    for attempt in range(2):
-        try:
-            check_ats_form(page, document, form, ats)
-            unanswered = fill_step(page, form, external=True)
-            pause(1, 2)
-            check_ats_form(page, document, form, ats)
-            unanswered += fill_step(page, form, external=True)  # Preserve first-pass uncertainty.
-            break
-        except ApplicationFormChanged:
-            # Only the original verified document may be rescanned. A same-host
-            # navigation/reload is still a new document and must remain blocked.
-            if document.count() != 1 or ats_provider(page.url) != ats:
-                raise UntrustedApplicationSite('document_changed_during_fill') from None
-            if attempt:
-                raise
-            log('  .. application form changed; reinspecting the same verified document once')
-            pause(0.5, 1)
-    check_ats_form(page, document, form, ats)
-    if require_manual_review(page, form, unanswered, job_id, title, company, form_url, external=True):
-        return "manual_review"
-
-    submit = form.locator("button[type='submit']:visible, input[type='submit']:visible")
-    if not submit.count():
-        submit = form.get_by_role("button", name=SUBMIT_RE)
-    if not submit.count():
-        screenshot(page, f"{job_id}_ext_nosubmit")
-        record_manual(job_id, title, company, form_url, "no_submit_button")
-        return "external_manual"
-    if DRY_RUN:
-        screenshot(page, f"{job_id}_ext_dryrun")
-        return preview_application(job_id)
-
-    check_ats_form(page, document, form, ats)
-    before = application_submission_signals(page)
-    def wait_result():
-        result = wait_application_submission(page, before, expected_host=urlparse(form_url).hostname)
-        return "applied_external" if result == "applied" else result
-    return submit_application(page, submit.last, job_id, title, company, form_url, wait_result, applied)
+def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_url: str, ats: str, applied: dict | None=None) -> str:
+    return ATSEngine(sys.modules[__name__]).apply_trusted_form(page, job_id, title, company, form_url, ats, applied)
 
 
 # ---------------------------------------------------------------- search
 
 def search_url(keyword: str, location: str) -> str:
-    s = CFG["search"]
-    params = {
-        "keywords": keyword,
-        "location": location,
-        "f_TPR": f"r{s['posted_within_hours'] * 3600}",
-        "sortBy": "DD",
-    }
-    if not EXTERNAL:
-        params["f_AL"] = "true"  # Easy Apply only.
-    if s.get("remote_only"):
-        params["f_WT"] = "2"
-    if s.get("experience_levels"):
-        params["f_E"] = ",".join(map(str, s["experience_levels"]))
-    return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
+    return LinkedInAdapter(sys.modules[__name__]).search_url(keyword, location)
 
 
 SCRAPE_IDS_JS = 'async () => (await (' + linkedin_search.COLLECT_JS + ')()).ids'
 
 
 def open_list(page: Page, url: str) -> list[str] | None:
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-    except Exception as e:
-        if "TOO_MANY_REDIRECTS" in str(e):
-            raise SessionLost() from None
-        if browser_closed(e):
-            raise BrowserClosed() from None
-        log(f"  ! could not open page: {str(e)[:100]}")
-        return None
-    pause(3, 5)
-    return list(dict.fromkeys(f for f in page.evaluate(SCRAPE_IDS_JS) if f and f.isdigit()))
+    return LinkedInAdapter(sys.modules[__name__]).open_list(page, url)
 
 
 def job_lists(page: Page):
-    """Search only the regions selected by the user, not personalized feeds."""
-    locations = selected_locations()
-    search = linkedin_search.LinkedInSearch(page, sys.modules[__name__])
-    unsupported = set()
-    try:
-        for kw in CFG['search']['keywords']:
-            for loc in locations:
-                key = f'linkedin:{kw}:{loc}'
-                if loc in unsupported:
-                    METRICS.mark('searches_failed', key)
-                    continue
-                for index in range(CFG['search']['pages_per_search']):
-                    try:
-                        result = search.search_page(kw, loc, index)
-                    except linkedin_search.SearchUnavailable as e:
-                        METRICS.mark('searches_failed', key)
-                        log(f'  ! LinkedIn search not applied: {kw!r} @ {loc!r}: {e}')
-                        if isinstance(e, linkedin_search.UnsupportedLocation):
-                            unsupported.add(loc)
-                        break
-                    METRICS.mark('searches_verified', key)
-                    found = result['ids']
-                    log(f"  '{kw}' @ {loc}, page {index + 1}: {len(found)} jobs (region verified)")
-                    yield found
-                    if result['has_next'] is False or (result['has_next'] is None and len(found) < 25):
-                        break
-    finally:
-        search.close()
+    return LinkedInAdapter(sys.modules[__name__]).job_lists(page)
 
 
 def first_text(page: Page, selectors: list[str]) -> str:
@@ -1993,24 +1034,7 @@ DESC_JS = """() => {
 
 
 def job_info(page: Page) -> tuple[str, str, str]:
-    """Use the current job card, never an assumed tab-title order."""
-    details = {}
-    for attempt in range(5):
-        details = page.evaluate(job_metadata.DETAILS_JS)
-        description = details.get('description', '').strip()
-        if description.casefold() in ('about the job', 'about this job'):
-            details['description'] = ''
-        if details.get('title') and details.get('company') and details.get('description'):
-            break
-        if attempt < 4:
-            page.wait_for_timeout(1000)
-    title, company, description = details.get('title', ''), details.get('company', ''), details.get('description', '')
-    if not title or not company or not description:
-        structured = job_metadata.page_metadata(page, 'linkedin', page.url, attempts=1)
-        title = title or structured.get('title', '')
-        company = company or structured.get('company', '')
-        description = description or html.unescape(re.sub(r'<[^>]+>', ' ', structured.get('description', '') or ''))
-    return title, company, description
+    return LinkedInAdapter(sys.modules[__name__]).job_info(page)
 
 
 def job_ok(title: str, company: str, description: str) -> str | None:
@@ -2399,47 +1423,11 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
 
 
 def linkedin_login(page: Page) -> bool:
-    page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-    pause(2, 4)
-    if re.search(r"login|checkpoint|authwall|signup|uas/", page.url) or page.url.rstrip("/") == "https://www.linkedin.com":
-        log("Not signed in. Please sign in to LinkedIn in the open Chrome window (waiting up to 10 minutes)...")
-        if "login" not in page.url:
-            page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-        try:
-            page.wait_for_url(re.compile(r"linkedin\.com/(feed|in/|mynetwork|jobs)"), timeout=600_000)
-        except PWTimeout:
-            log("LinkedIn login was not completed; moving to other sources.")
-            return False
-        pause(3, 5)
-    log("LinkedIn login complete.")
-    return True
+    return LinkedInAdapter(sys.modules[__name__]).linkedin_login(page)
 
 
 def run_linkedin(page: Page, applied: dict, count: int) -> int:
-    if submission_quota_status('linkedin') or count >= CFG['limits']['max_applications_per_run']:
-        return count
-    if not linkedin_login(page):
-        return count
-    stop = min(CFG["limits"]["max_applications_per_run"], count + CFG["limits"].get("per_source", 15))
-    visited = set()
-    try:
-        for job_ids in job_lists(page):
-            for job_id in job_ids:
-                if job_id in visited:
-                    continue
-                visited.add(job_id)
-                if not should_visit_job(applied, job_id):
-                    continue
-                if count >= stop or submission_quota_status('linkedin') or time.time() > DEADLINE:
-                    raise LimitReached
-                with submission_source('linkedin'):
-                    if process_job(page, applied, job_id):
-                        count += 1
-    except LimitReached:
-        log("Run application limit or runtime limit reached.")
-    except SessionLost:
-        log("LinkedIn session expired. Sign in again on the next run; moving to other sources.")
-    return count
+    return LinkedInAdapter(sys.modules[__name__]).run_linkedin(page, applied, count)
 
 
 def launch(pw):
@@ -2502,7 +1490,8 @@ def run_bot(*, reset_stop: bool = True) -> int:
                 pass
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count} attempts={ATTEMPTS['total']}\n", encoding="utf-8")
     log('Finished. ' + METRICS.summary(submit_attempts=0 if DRY_RUN else ATTEMPTS['total']))
-    log(f'Deferred applications awaiting manual input: {len(deferred_review.queue(applied, MANUAL_FILE))}. Open Deferred applications in the GUI after the run.')
+    pending = deferred_review.queue(applied, MANUAL_FILE, sys.modules[__name__])
+    log(f"Deferred applications awaiting manual input: {sum(job['category'] == 'manual' for job in pending)}; not processed due to limits: {sum(job['category'] == 'limit' for job in pending)}. Open Deferred applications in the GUI after the run.")
     return 0
 
 

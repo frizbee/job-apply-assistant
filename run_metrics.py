@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 class RunMetrics:
     STAGES = ('seen', 'history_skipped', 'evaluated', 'rejected', 'manual', 'errors',
-              'forms_opened', 'forms_changed', 'previews', 'confirmed', 'searches_verified', 'searches_failed')
+              'forms_opened', 'forms_changed', 'previews', 'confirmed', 'searches_verified', 'searches_failed', 'duplicates_skipped')
 
     def __init__(self):
         self.reset()
@@ -34,6 +34,8 @@ class RunMetrics:
             self.mark('confirmed', job_id)
         elif status in ('pre_submission_error', 'error'):
             self.mark('errors', job_id)
+        elif status == 'external_duplicate':
+            self.mark('duplicates_skipped', job_id)
         else:
             # Blocked, unsupported and uncertain outcomes are not filled forms.
             self.mark('manual', job_id)
