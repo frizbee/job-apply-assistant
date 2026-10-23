@@ -133,6 +133,7 @@ class BrowserGUIControlTests(SafetyTest):
         self.errors, self.quit_requests = [], []
         self.profile_error = ""
         self.start_error = None
+        self.state_extra = {}
         self.page.on("pageerror", lambda error: self.errors.append(error))
         def respond(route):
             path = route.request.url.split("autoapply.test", 1)[-1]
@@ -141,7 +142,7 @@ class BrowserGUIControlTests(SafetyTest):
             elif path == "/api/state":
                 route.fulfill(json={"settings": {}, "cv_name": "", "has_key": False,
                                     "default_locations": ["Worldwide"], "profile": None, "running": False,
-                                    "profile_error": self.profile_error})
+                                    "profile_error": self.profile_error, **self.state_extra})
             elif path == "/api/start" and self.start_error:
                 route.fulfill(json=self.start_error)
             elif path == "/api/quit":
@@ -164,6 +165,77 @@ class BrowserGUIControlTests(SafetyTest):
         self.assertEqual(self.page.evaluate("localStorage.getItem('lang')"), "en")
         self.assertEqual(len(self.quit_requests), 1)
         self.assertEqual(self.quit_requests[0].method, "POST")
+        self.assertEqual(self.errors, [])
+
+    def open_profile_form(self, settings=None):
+        import application_answers
+        self.state_extra = {'settings': settings or {}, 'question_templates': application_answers.TEMPLATES}
+        self.page.goto('http://autoapply.test/')
+        self.page.wait_for_function("document.getElementById('english').value === '3'")
+        self.page.locator('#manual').click()
+
+    def test_regions_are_multiselect_and_preserve_saved_custom_values(self):
+        selected = ['United States', 'Canada', 'European Union', 'EMEA', 'Custom Region']
+        self.open_profile_form({'locations': selected})
+        self.assertEqual(self.page.locator('#locations input[type=checkbox]').count(), 7)
+        self.assertEqual(self.page.evaluate('startBody().locations'), selected)
+        self.page.locator('#locations').get_by_label('Canada', exact=True).uncheck()
+        self.page.locator('#locations').get_by_label('European Economic Area', exact=True).check()
+        saved = self.page.evaluate('startBody().locations')
+        self.assertNotIn('Canada', saved)
+        self.assertIn('European Economic Area', saved)
+        self.assertIn('Custom Region', saved)
+        self.page.locator('[data-l="tr"]').click()
+        self.assertEqual(self.page.evaluate('startBody().locations'), saved)
+        self.assertEqual(self.errors, [])
+
+    def test_regions_not_selected_implicitly_and_empty_selection_is_preserved(self):
+        self.open_profile_form({'locations': []})
+        self.assertEqual(self.page.locator('#locations input:checked').count(), 0)
+        self.assertEqual(self.page.evaluate('startBody().locations'), [])
+
+    def test_questions_use_full_labels_and_editable_wording(self):
+        import application_answers
+        self.open_profile_form()
+        self.assertEqual(self.page.locator('.question-preset').count(), 14)
+        label = self.page.locator('label[for="preset-answer-0"]')
+        self.assertEqual(label.inner_text(), 'What is your nationality?')
+        self.assertTrue(label.is_visible())
+        self.assertEqual(self.page.get_by_label('What is your nationality?', exact=True).count(), 1)
+        self.assertEqual(self.page.locator('#preset-answer-0').input_value(), '')
+        self.page.locator('#preset-answer-0').fill('User-confirmed nationality')
+        self.page.locator('.question-preset').first.locator('summary').click()
+        self.page.locator('#preset-question-0').fill('What is your nationality? Exact employer wording')
+        self.assertEqual(label.inner_text(), 'What is your nationality? Exact employer wording')
+        entries = self.page.evaluate('startBody().question_presets')
+        self.assertEqual(entries[0], {'question': label.inner_text(), 'answer': 'User-confirmed nationality'})
+        self.assertEqual([e['question'] for e in entries[10:]], application_answers.TEMPLATES[10:])
+        self.assertTrue(all(not e['answer'] for e in entries[10:]))
+        self.page.locator('[data-l="tr"]').click()
+        self.assertEqual(self.page.evaluate('startBody().question_presets'), entries)
+        self.assertEqual(self.errors, [])
+
+    def test_existing_ten_answers_survive_and_new_answers_start_blank(self):
+        import application_answers
+        entries = [{'question': q, 'answer': f'My reviewed answer {i}'} for i, q in enumerate(application_answers.TEMPLATES[:10])]
+        # fill() intentionally ignores presets until a CV profile is present.
+        self.open_profile_form({'question_presets': entries})
+        self.page.evaluate('fill({})')
+        result = self.page.evaluate('startBody().question_presets')
+        self.assertEqual(result[:10], entries)
+        self.assertTrue(all(e['answer'] == '' for e in result[10:]))
+
+    def test_mobile_form_has_no_horizontal_overflow_and_controls_share_height(self):
+        self.page.set_viewport_size({'width': 375, 'height': 812})
+        self.open_profile_form()
+        self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+        height = self.page.locator('#first_name').evaluate('e => e.getBoundingClientRect().height')
+        for selector in ['#phone_country_code', '#phone_national', '#english']:
+            self.assertEqual(self.page.locator(selector).evaluate('e => e.getBoundingClientRect().height'), height)
+        self.assertGreaterEqual(height, 44)
+        label = self.page.locator('label[for="preset-answer-12"]')
+        self.assertGreater(label.bounding_box()['height'], 22)
+        self.assertTrue(self.page.locator('#start').is_visible())
         self.assertEqual(self.errors, [])
 
     def test_invalid_saved_language_does_not_break_real_page(self):

@@ -13,7 +13,13 @@ TEMPLATES = [
     'Do you have any accessibility needs?',
     'Do you identify as a neurodivergent or neurodiverse person?',
     'Are you willing to relocate?',
+    'What are your salary expectations?',
+    'What is your level of proficiency in English?',
+    'Will you now or in the future require sponsorship for employment visa status?',
+    'Are you legally authorized to work in Spain',
 ]
+
+MAX_PRESETS = len(TEMPLATES)
 
 
 def question_key(question):
@@ -21,8 +27,8 @@ def question_key(question):
 
 
 def validate_presets(entries):
-    if not isinstance(entries, list) or len(entries) > 10:
-        raise ValueError('question_presets: expected up to 10 question/answer pairs')
+    if not isinstance(entries, list) or len(entries) > MAX_PRESETS:
+        raise ValueError(f'question_presets: expected up to {MAX_PRESETS} question/answer pairs')
     seen = set()
     for entry in entries:
         if (not isinstance(entry, dict) or set(entry) != {'question', 'answer'}

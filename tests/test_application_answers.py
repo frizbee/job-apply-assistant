@@ -59,10 +59,24 @@ class ReviewedAnswerTests(SafetyTest):
     def test_validation_rejects_duplicates_types_and_excess_entries(self):
         for entries in [None, {}, [{'question': 'Q', 'answer': True}],
                         [{'question': 'Q*', 'answer': ''}, {'question': 'q', 'answer': ''}],
-                        [{'question': str(i), 'answer': ''} for i in range(11)]]:
+                        [{'question': str(i), 'answer': ''} for i in range(answers.MAX_PRESETS + 1)]]:
             with self.assertRaises(ValueError):
                 answers.validate_presets(entries)
-        self.assertEqual(len(answers.TEMPLATES), 10)
+        self.assertEqual(len(answers.TEMPLATES), 14)
+
+    def test_new_templates_are_blank_and_country_specific_answers_stay_scoped(self):
+        entries = [{'question': question, 'answer': ''} for question in answers.TEMPLATES]
+        answers.validate_presets(entries)
+        apply.SETTINGS.update(cv_hash='cv1', question_presets_cv_hash='cv1', question_presets=entries)
+        for question in answers.TEMPLATES[-4:]:
+            self.assertEqual(answers.preset_answer(question, apply.SETTINGS), [])
+        entries[-1]['answer'] = 'No'
+        self.assertEqual(apply.answer('Are you legally authorized to work in Spain*'), ['No'])
+        self.assertEqual(apply.answer('Are you legally authorized to work in Canada'), [])
+        entries[-4]['answer'] = '6000 USD per month'
+        self.assertEqual(apply.answer('What are your salary expectations?'), ['6000 USD per month'])
+        apply.SETTINGS['cv_hash'] = 'different-cv'
+        self.assertEqual(answers.preset_answer(entries[-1]['question'], apply.SETTINGS), [])
 
 
 @unittest.skipUnless(os.getenv('AUTOAPPLY_BROWSER_TESTS') == '1', 'offline browser fixtures')

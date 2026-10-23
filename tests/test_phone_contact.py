@@ -57,7 +57,7 @@ class PhoneGuiTests(unittest.TestCase):
             self.assertEqual(page.locator('#phone_intl').input_value(), '+905551234567')
             page.locator('#phone_country_code').fill('+90')
             page.locator('#phone_national').fill('5551234567')
-            self.assertEqual(page.locator('.question-preset').count(), 10)
+            self.assertEqual(page.locator('.question-preset').count(), len(gui.apply.application_answers.TEMPLATES))
             self.assertEqual(page.locator('.preset-answer').first.input_value(), '')
             page.locator('.preset-answer').first.fill('Test nationality')
             page.locator('#start').click()

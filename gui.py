@@ -475,38 +475,61 @@ PAGE = r"""<!doctype html>
 :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --muted:#667085; --line:#e4e7ec; --accent:#2563eb; --ok:#16a34a; --warn:#b45309; }
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
-main { max-width: 820px; margin: 0 auto; padding: 28px 20px 60px; }
-header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 18px; }
+main { max-width: 1040px; margin: 0 auto; padding: 28px 20px 60px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom: 18px; }
 h1 { font-size: 24px; margin: 0; }
 h2 { font-size: 17px; margin: 0 0 4px; }
+h3 { font-size:16px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
 .step { color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.04em; }
 p.hint { color:var(--muted); margin: 4px 0 14px; }
-label { display:block; font-weight:600; font-size:13px; margin: 12px 0 4px; }
-input[type=text], input[type=password], select, textarea { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
-textarea { min-height: 90px; resize: vertical; }
+label, legend { display:block; font-weight:600; font-size:14px; margin: 12px 0 6px; overflow-wrap:anywhere; }
+input[type=text], input[type=password], input[type=tel], select, textarea { width:100%; min-width:0; min-height:44px; padding:10px 12px; border:1px solid #cbd2dc; border-radius:8px; font:inherit; color:var(--text); background:#fff; }
+input[type=text], input[type=password], input[type=tel], select { height:44px; }
+input[readonly] { background:var(--bg); color:var(--muted); }
+textarea { min-height: 96px; resize: vertical; }
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible { outline:3px solid #93b4fa; outline-offset:2px; }
+input[type=checkbox] { width:18px; height:18px; flex-shrink:0; accent-color:var(--accent); }
 .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .grid3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 14px; }
-button { font:inherit; font-weight:600; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; background:var(--accent); color:#fff; }
+.grid > *, .grid3 > * { min-width:0; }
+button, a.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; min-width:160px; max-width:100%; font:inherit; line-height:1.4; font-weight:600; text-align:center; border:1px solid transparent; border-radius:8px; padding:10px 16px; cursor:pointer; background:var(--accent); color:#fff; overflow-wrap:anywhere; }
+button:hover:not(:disabled) { filter:brightness(.95); }
 button.secondary { background:#eef2ff; color:var(--accent); }
 button.danger { background:#dc2626; }
 button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+.row > button, .row > a.btn { flex:1 1 180px; }
 .drop { border:2px dashed var(--line); border-radius:12px; padding:22px; text-align:center; cursor:pointer; }
 .drop.has { border-color: var(--ok); }
-.checks label { display:inline-flex; align-items:center; gap:6px; font-weight:500; margin:6px 16px 0 0; }
+.checks { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; }
+.checks label { display:inline-flex; align-items:center; gap:8px; min-height:44px; font-weight:500; margin:0; cursor:pointer; }
+fieldset { min-width:0; border:1px solid var(--line); border-radius:8px; padding:8px 14px 14px; margin:16px 0; }
+legend { padding:0 6px; }
+.region-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.region-options label { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+.region-options label:has(input:checked) { background:#eef2ff; border-color:#93b4fa; }
+.question-preset { border:1px solid var(--line); border-radius:10px; padding:16px; margin:12px 0; }
+.question-preset > label { margin:0 0 8px; font-size:15px; white-space:pre-wrap; }
+.question-preset textarea { min-height:76px; }
+.question-preset details { margin-top:10px; }
+summary { color:var(--accent); cursor:pointer; font-size:14px; }
+.deferred-job { border:1px solid var(--line); border-radius:10px; padding:16px; margin-top:12px; }
+.deferred-job h3 { margin:0 0 6px; }
+.deferred-job p, #review_issues { overflow-wrap:anywhere; }
 .msg { margin-top:10px; font-size:14px; }
 .msg.err { color:#b91c1c; } .msg.ok { color:var(--ok); }
 #log { background:#0f172a; color:#e2e8f0; font:12.5px/1.45 ui-monospace, Menlo, Consolas, monospace; border-radius:8px; padding:12px; height:340px; overflow:auto; white-space:pre-wrap; }
 .notice { background:#fffbeb; border:1px solid #fde68a; color:#78350f; border-radius:8px; padding:10px 12px; margin-top:12px; font-size:14px; }
 .notice.free { background:#f0fdf4; border-color:#bbf7d0; color:#14532d; margin:14px 0 4px; }
 ol.steps { margin:4px 0; padding-left:20px; color:var(--text); } ol.steps li { margin:3px 0; }
-a.btn { display:inline-block; text-decoration:none; font-weight:600; border-radius:8px; padding:9px 14px; background:#eef2ff; color:var(--accent); }
-.lang button { background:none; color:var(--muted); padding:4px 6px; }
+a.btn { text-decoration:none; background:#eef2ff; color:var(--accent); }
+.lang { display:flex; gap:6px; }
+.lang button { background:#fff; border-color:var(--line); color:var(--muted); min-width:44px; }
 .lang button.on { color:var(--text); text-decoration: underline; }
 .hidden { display:none; }
 input.missing { border-color:#dc2626; background:#fef2f2; }
-@media (max-width: 640px) { .grid, .grid3 { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .grid, .grid3, .region-options { grid-template-columns: 1fr; } main { padding:20px 12px 40px; } .card { padding:16px; } .row > button, .row > a.btn { flex-basis:100%; } }
 </style></head>
 <body><main>
 <header><h1>Auto Apply</h1>
@@ -530,38 +553,41 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
 <section class="card hidden" id="s2">
   <div class="step" data-t="step2"></div><h2 data-t="review_title"></h2><p class="hint" data-t="review_hint"></p>
   <div class="grid">
-    <div><label data-t="first_name"></label><input type="text" id="first_name"></div>
-    <div><label data-t="last_name"></label><input type="text" id="last_name"></div>
-    <div><label data-t="email"></label><input type="text" id="email"></div>
-    <div><label data-t="phone_country_code"></label><input type="tel" id="phone_country_code" placeholder="+90"></div>
-    <div><label data-t="phone_national"></label><input type="tel" id="phone_national" placeholder="555 000 00 00"></div>
-    <div><label data-t="phone_saved"></label><input type="text" id="phone_intl" readonly><p class="hint" data-t="phone_split_hint"></p></div>
-    <div><label data-t="city"></label><input type="text" id="city"></div>
-    <div><label data-t="country"></label><input type="text" id="country"></div>
-    <div><label>LinkedIn</label><input type="text" id="linkedin"></div>
-    <div><label data-t="github"></label><input type="text" id="github"></div>
+    <div><label for="first_name" data-t="first_name"></label><input type="text" id="first_name"></div>
+    <div><label for="last_name" data-t="last_name"></label><input type="text" id="last_name"></div>
+    <div><label for="email" data-t="email"></label><input type="text" id="email"></div>
+    <div><label for="phone_country_code" data-t="phone_country_code"></label><input type="tel" id="phone_country_code" placeholder="+90"></div>
+    <div><label for="phone_national" data-t="phone_national"></label><input type="tel" id="phone_national" placeholder="555 000 00 00"></div>
+    <div><label for="phone_intl" data-t="phone_saved"></label><input type="text" id="phone_intl" readonly><p class="hint" data-t="phone_split_hint"></p></div>
+    <div><label for="city" data-t="city"></label><input type="text" id="city"></div>
+    <div><label for="country" data-t="country"></label><input type="text" id="country"></div>
+    <div><label for="linkedin">LinkedIn</label><input type="text" id="linkedin"></div>
+    <div><label for="github" data-t="github"></label><input type="text" id="github"></div>
   </div>
   <div class="checks"><label><input type="checkbox" id="replace_prefilled_contacts"> <span data-t="replace_prefilled_contacts"></span></label></div>
-  <label data-t="titles"></label><textarea id="job_titles"></textarea>
-  <label data-t="excluded_title_words"></label><textarea id="excluded_title_words" style="min-height:60px"></textarea>
+  <label for="job_titles" data-t="titles"></label><textarea id="job_titles"></textarea>
+  <label for="excluded_title_words" data-t="excluded_title_words"></label><textarea id="excluded_title_words" style="min-height:60px"></textarea>
   <p class="hint" data-t="excluded_title_hint"></p>
-  <label data-t="target_technologies"></label><textarea id="target_technologies" style="min-height:60px"></textarea>
-  <label data-t="excluded_technologies"></label><textarea id="excluded_technologies" style="min-height:60px"></textarea>
+  <label for="target_technologies" data-t="target_technologies"></label><textarea id="target_technologies" style="min-height:60px"></textarea>
+  <label for="excluded_technologies" data-t="excluded_technologies"></label><textarea id="excluded_technologies" style="min-height:60px"></textarea>
   <p class="hint" data-t="technology_hint"></p>
-  <label data-t="locations"></label><textarea id="locations" style="min-height:60px"></textarea>
-  <div class="grid3">
-    <div><label data-t="years"></label><input type="text" id="total_years"></div>
-    <div><label data-t="notice"></label><input type="text" id="notice"></div>
+  <fieldset aria-describedby="locations_hint"><legend data-t="locations"></legend>
+    <p class="hint" id="locations_hint" data-t="locations_hint"></p>
+    <div id="locations" class="checks region-options"></div>
+  </fieldset>
+  <div class="grid">
+    <div><label for="total_years" data-t="years"></label><input type="text" id="total_years"></div>
+    <div><label for="notice" data-t="notice"></label><input type="text" id="notice"></div>
   </div>
   <div class="grid3">
-    <div><label data-t="salary"></label><div style="display:flex;gap:6px"><input type="text" id="salary">
-      <select id="currency" style="width:90px"><option>TRY</option><option>USD</option><option>EUR</option><option>GBP</option><option>PLN</option><option>CHF</option><option>INR</option><option>CAD</option></select></div></div>
-    <div><label data-t="salary_eur"></label><input type="text" id="salary_eur" placeholder="EUR"></div>
-    <div><label data-t="salary_usd"></label><input type="text" id="salary_usd" placeholder="USD"></div>
+    <div><label for="salary" data-t="salary"></label><div style="display:flex;gap:6px"><input type="text" id="salary">
+      <select id="currency" aria-label="Salary currency" style="width:90px;flex-shrink:0"><option>TRY</option><option>USD</option><option>EUR</option><option>GBP</option><option>PLN</option><option>CHF</option><option>INR</option><option>CAD</option></select></div></div>
+    <div><label for="salary_eur" data-t="salary_eur"></label><input type="text" id="salary_eur" placeholder="EUR"></div>
+    <div><label for="salary_usd" data-t="salary_usd"></label><input type="text" id="salary_usd" placeholder="USD"></div>
   </div>
   <p class="hint" data-t="salary_hint" style="margin:6px 0 0"></p>
-  <label data-t="english"></label><select id="english"></select>
-  <label data-t="cover"></label><textarea id="cover_letter"></textarea>
+  <label for="english" data-t="english"></label><select id="english"></select>
+  <label for="cover_letter" data-t="cover"></label><textarea id="cover_letter"></textarea>
   <h3 data-t="question_presets_title"></h3><p class="hint" data-t="question_presets_hint"></p>
   <div id="question_presets"></div>
 </section>
@@ -587,8 +613,8 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
   <div id="review_panel" class="hidden">
     <p id="review_status"></p><pre id="review_issues" style="white-space:pre-wrap"></pre>
     <p class="hint" data-t="review_browser_hint"></p>
-    <button id="review_continue" data-t="review_continue"></button>
-    <button class="secondary" id="review_skip" data-t="review_skip"></button>
+   <div class="row"><button id="review_continue" data-t="review_continue"></button>
+    <button class="secondary" id="review_skip" data-t="review_skip"></button></div>
   </div>
   <div class="msg" id="review_message"></div>
 </section>
@@ -604,12 +630,14 @@ const T = {
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", phone_country_code:"Phone country calling code", phone_national:"Phone number (without country calling code)", phone_saved:"Previously saved full phone number", phone_split_hint:"Confirm the calling code and remaining number separately. An unsplit old number is shown for reference only; no code is guessed from your location.", city:"City, Country", country:"Country", github:"GitHub / portfolio",
-  question_presets_title:"Common questions: 10 reviewed answer templates", question_presets_hint:"Edit each question to match the employer's wording and enter your own confirmed answer (Yes/No for binary questions). Blank answers remain manual. Matching is exact apart from case, whitespace and the required-field asterisk. Country/company-specific questions are not generalized. Saved with this CV; no automatic Yes answers.",
+  question_presets_title:"Additional questions and confirmed answers", question_presets_hint:"Enter only your own confirmed answers. Blank answers remain manual. Use Edit question to match the employer's exact wording; case, whitespace and a trailing required-field asterisk are ignored. Work authorization and sponsorship answers apply only to the stated country and wording. For salary, specify amount, currency and period; a question without currency/period cannot safely use an automatic conversion. Answers are saved with this CV; no automatic Yes answers.",
+  edit_question:"Edit question", question_wording:"Exact employer question", confirmed_answer:"Your confirmed answer (optional)",
+  locations_hint:"Select one or more regions. EMEA includes Europe, the Middle East and Africa. EU, EEA and EMEA overlap; applications remain protected against duplicates. A region match does not establish permission to work there.",
   replace_prefilled_contacts:"Replace site-prefilled name, email and phone with my reviewed profile values when they differ. Check your profile carefully before enabling.",
   err_review_unavailable:"The deferred queue or selected application is unavailable.", err_invalid_review_job:"Choose a deferred application.", err_review_not_waiting:"This review step has changed. Wait for the current step.", err_invalid_review_action:"Unknown review action.",
   deferred_manual:"Needs manual input", deferred_limits:"Not processed: run limits", review_retry:"Process this application",
   deferred_title:"Deferred applications", deferred_hint:"Incomplete forms do not stop bulk processing. Review them one at a time afterwards. The current CV/profile and Test mode checkbox above apply to assisted review. A website draft is not guaranteed to survive reopening.", refresh_deferred:"Refresh queue", review_open:"Review this application", review_external:"Open website manually", review_mark_sent:"I submitted outside the app", review_continue:"I checked this step — check and continue", review_skip:"Skip for now", review_browser_hint:"Fill the current step in Chrome, then confirm here. Do not click Submit in Chrome. Your confirmation applies only to this step; it does not save general answers. LIVE review asks for a separate final confirmation.", review_live_confirm:"LIVE review may send this one application after your final confirmation. Continue?", review_external_confirm:"This opens your regular browser outside Test mode. Any sending there is your own manual action. Continue?", review_sent_confirm:"Did you submit this application outside the app? It will be marked UNCONFIRMED and protected against retries, not counted as confirmed success.", review_unavailable:"This item is no longer available for review.",
-  titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
+  titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
   target_technologies:"Target technologies (one per line; advisory)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Missing target technology evidence does not block application processing. Explicit exclusions still apply to the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
   excluded_title_words:"Excluded words / phrases in job titles (one per line)", excluded_title_hint:"Optional; empty means no exclusions. Matches only the job title, not the description. Literal, case-insensitive terms, not regex; no built-in list.",
   notice:"Notice period (days)", english:"English level", cover:"Short cover letter (used when a form asks for one)",
@@ -635,12 +663,14 @@ const T = {
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", phone_country_code:"Telefon ülke arama kodu", phone_national:"Telefon numarası (ülke arama kodu olmadan)", phone_saved:"Önceden kaydedilmiş tam telefon numarası", phone_split_hint:"Arama kodunu ve kalan numarayı ayrı ayrı doğrulayın. Eski numara yalnızca referans içindir; konumunuzdan kod tahmin edilmez.", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
-  question_presets_title:"Sık sorulan sorular: 10 onaylı yanıt şablonu", question_presets_hint:"Soruyu işverenin metnine göre düzenleyin ve onayladığınız yanıtı girin (ikili sorular için Yes/No). Boş yanıtlar manuel kalır. Eşleşme yalnızca harf boyutu, boşluk ve zorunlu alan yıldızını yok sayar. Ülkeye/şirkete özel sorular genelleştirilmez. Bu CV ile kaydedilir; otomatik Yes yanıtı yoktur.",
+  question_presets_title:"Ek sorular ve onaylı yanıtlar", question_presets_hint:"Yalnızca kendi onayladığınız yanıtları girin. Boş yanıtlar manuel kalır. Soruyu düzenle ile işverenin tam metnini kullanın; harf boyutu, boşluk ve sondaki zorunlu alan yıldızı yok sayılır. Çalışma izni ve sponsorluk yanıtları yalnızca belirtilen ülke ve soru için geçerlidir. Maaş için tutar, para birimi ve dönem belirtin; para birimi/dönem içermeyen soruda otomatik dönüşüm güvenli değildir. Yanıtlar bu CV ile kaydedilir; otomatik Yes yanıtı yoktur.",
+  edit_question:"Soruyu düzenle", question_wording:"İşverenin tam sorusu", confirmed_answer:"Onayladığınız yanıt (isteğe bağlı)",
+  locations_hint:"Bir veya daha fazla bölge seçin. EMEA; Avrupa, Orta Doğu ve Afrika'yı kapsar. AB, AEA ve EMEA örtüşür; yinelenen başvurulara karşı koruma sürer. Bölge eşleşmesi çalışma izni anlamına gelmez.",
   replace_prefilled_contacts:"Sitenin önceden doldurduğu ad, e-posta ve telefonu farklıysa onayladığım profil değerleriyle değiştir. Etkinleştirmeden önce profilinizi dikkatlice kontrol edin.",
   err_review_unavailable:"Ertelenen kuyruk veya seçili başvuru kullanılamıyor.", err_invalid_review_job:"Ertelenen bir başvuru seçin.", err_review_not_waiting:"İnceleme adımı değişti. Geçerli adımı bekleyin.", err_invalid_review_action:"Bilinmeyen inceleme işlemi.",
   deferred_manual:"Manuel giriş gerekiyor", deferred_limits:"İşlenmedi: çalışma limitleri", review_retry:"Bu başvuruyu işle",
   deferred_title:"Ertelenen başvurular", deferred_hint:"Eksik formlar toplu işlemi durdurmaz. Daha sonra tek tek inceleyin. Yukarıdaki güncel CV/profil ve Test modu seçimi geçerlidir. Site taslağının korunması garanti edilmez.", refresh_deferred:"Kuyruğu yenile", review_open:"Başvuruyu incele", review_external:"Siteyi manuel aç", review_mark_sent:"Uygulama dışında gönderdim", review_continue:"Bu adımı kontrol ettim — kontrol et ve devam et", review_skip:"Şimdilik atla", review_browser_hint:"Geçerli adımı Chrome'da doldurun ve burada onaylayın. Chrome'da Submit'e basmayın. Onay yalnızca bu adıma uygulanır; genel yanıt kaydetmez. CANLI modda ayrıca son onay istenir.", review_live_confirm:"CANLI inceleme, son onayınızdan sonra bu başvuruyu gönderebilir. Devam edilsin mi?", review_external_confirm:"Normal tarayıcınız Test modu dışında açılır. Buradaki gönderimler sizin manuel işleminizdir. Devam edilsin mi?", review_sent_confirm:"Bu başvuruyu uygulama dışında gönderdiniz mi? Doğrulanmamış olarak işaretlenecek ve tekrar denemeye karşı korunacaktır; doğrulanmış başarı sayılmaz.", review_unavailable:"Bu başvuru artık incelemeye uygun değil.",
-  titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
+  titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
   target_technologies:"Hedef teknolojiler (her satıra bir tane; bilgi amaçlı)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"Hedef teknoloji kanıtının bulunmaması başvurunun işlenmesini engellemez. Açık hariç tutmalar pozisyon başlığına veya zorunlu gereksinimlere uygulanır; isteğe bağlı becerilere uygulanmaz. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
   excluded_title_words:"Pozisyon başlığında hariç tutulan kelimeler / ifadeler (her satıra bir tane)", excluded_title_hint:"İsteğe bağlı; boş liste hariç tutmaz. Yalnızca başlıkta aranır, açıklamada değil. Büyük/küçük harfe duyarsızdır; regex veya yerleşik liste değildir.",
   notice:"İhbar süresi (gün)", english:"İngilizce seviyesi", cover:"Kısa ön yazı (form isterse kullanılır)",
@@ -660,6 +690,7 @@ const T = {
    err_analyze_failed:"CV otomatik okunamadı. Bilgilerini kendin doldurabilirsin.", err_invalid_profile:"Geçersiz profil. Bilgilerini kontrol et veya CV'yi yeniden oku.", err_invalid_settings:"Geçersiz çalışma ayarları. Seçenekleri kontrol et.", err_startup_failed:"Başlatılamadı. Kaydı kontrol edip tekrar dene.", err_busy:"Başka bir işlem devam ediyor. Tamamlanmasını bekle.", err_no_titles:"En az bir pozisyon yaz.", err_missing:"Kırmızı işaretli alanları doldur. Başvuru formları bunları her zaman soruyor.", err_already_running:"Zaten çalışıyor." },
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
+const REGIONS = ["United States", "Canada", "Latin America", "European Union", "European Economic Area", "EMEA"];
 const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);
 let lang = "en", S = null, logFrom = 0, poll = null, uiClosed = false, activeReview = null;
 try {
@@ -675,6 +706,7 @@ function render() {
   const v = $("english").value;
   $("english").innerHTML = Object.entries(t("levels")).map(([k, l]) => `<option value="${k}">${l}</option>`).join("");
   if (v) $("english").value = v;
+  document.querySelectorAll(".preset-answer").forEach(e => { e.placeholder = t("confirmed_answer"); });
   testHint();
 }
 function testHint() {
@@ -699,15 +731,21 @@ function fill(p, show = true) {
   $("job_titles").value = (p.job_titles || []).join("\n");
   $("question_presets").replaceChildren();
   const templates = S.question_templates || [];
-  for (let i = 0; i < 10; i++) {
-    const row = document.createElement("div"), question = document.createElement("input"), answer = document.createElement("textarea");
+  for (let i = 0; i < Math.max(templates.length, reviewedPresets.length); i++) {
+    const row = document.createElement("div"), question = document.createElement("textarea"), answer = document.createElement("textarea");
+    const label = document.createElement("label"), edit = document.createElement("details"), summary = document.createElement("summary"), editLabel = document.createElement("label");
     row.className = "question-preset";
     question.className = "preset-question"; question.value = reviewedPresets[i]?.question ?? templates[i] ?? "";
-    question.setAttribute("aria-label", "Question " + (i + 1));
+    question.id = "preset-question-" + i;
+    editLabel.setAttribute("for", question.id); editLabel.dataset.t = "question_wording"; editLabel.textContent = t("question_wording");
     answer.className = "preset-answer"; answer.value = reviewedPresets[i]?.answer ?? "";
-    answer.setAttribute("aria-label", "Confirmed answer " + (i + 1));
-    answer.style.minHeight = "50px";
-    row.append(question, answer); $("question_presets").append(row);
+    answer.id = "preset-answer-" + i;
+    answer.placeholder = t("confirmed_answer");
+    label.setAttribute("for", answer.id); label.textContent = question.value;
+    question.oninput = () => { label.textContent = question.value; };
+    summary.dataset.t = "edit_question"; summary.textContent = t("edit_question");
+    edit.append(summary, editLabel, question);
+    row.append(label, answer, edit); $("question_presets").append(row);
   }
   if (show) { $("s2").classList.remove("hidden"); $("s3").classList.remove("hidden"); }
 }
@@ -720,7 +758,7 @@ async function load() {
   $("english").value = st.english || "3"; const ms = st.monthly_salary_by_currency || {}, cur = st.home_currency || st.currency || "USD";
   $("currency").value = cur; $("salary").value = ms[cur] ?? (st.salary ? Math.round(st.salary / 12) : "");
   $("salary_eur").value = ms.EUR ?? ""; $("salary_usd").value = ms.USD ?? ""; $("notice").value = st.notice || "";
-  $("locations").value = (st.locations || S.default_locations).join("\n");
+  fillLocations(st.locations || S.default_locations || []);
   $("target_technologies").value = (st.target_technologies || []).join("\n");
   $("excluded_title_words").value = (st.excluded_title_words || []).join("\n");
   $("excluded_technologies").value = (st.excluded_technologies || []).join("\n");
@@ -763,11 +801,20 @@ $("analyze").onclick = async () => {
 $("changekey").onclick = () => { $("keybox").classList.remove("hidden"); $("changekey").classList.add("hidden"); $("key").focus(); };
 $("manual").onclick = () => { fill(S.profile); $("s2").scrollIntoView({ behavior: "smooth" }); };
 const lines = id => $(id).value.split("\n").map(s => s.trim()).filter(Boolean);
+function fillLocations(selected) {
+  $("locations").replaceChildren();
+  // Preserve existing custom regions verbatim, rather than silently losing them.
+  for (const region of [...new Set([...REGIONS, ...selected])]) {
+    const label = document.createElement("label"), box = document.createElement("input"), text = document.createElement("span");
+    box.type = "checkbox"; box.value = region; box.checked = selected.includes(region);
+    text.textContent = region; label.append(box, text); $("locations").append(label);
+  }
+}
 function startBody() {
   const profile = {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
-  const body = { profile, cv_hash: S.cv_hash, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+  const body = { profile, cv_hash: S.cv_hash, locations: [...document.querySelectorAll("#locations input:checked")].map(e => e.value), salary: $("salary").value, currency: $("currency").value,
     question_presets: [...document.querySelectorAll(".question-preset")].map(row => ({ question: row.querySelector(".preset-question").value.trim(), answer: row.querySelector(".preset-answer").value.trim() })).filter(entry => entry.question || entry.answer),
     phone_country_code: $("phone_country_code").value.trim(), phone_national: $("phone_national").value.trim(),
     replace_prefilled_contacts: $("replace_prefilled_contacts").checked,
@@ -804,6 +851,7 @@ async function refreshDeferred() {
     const heading = document.createElement('h3'); heading.textContent = t(label) + ' (' + jobs.length + ')'; root.append(heading);
     for (const job of jobs) {
     const row = document.createElement('div'), title = document.createElement('h3'), reason = document.createElement('p');
+    row.className = 'deferred-job';
     title.textContent = job.title + ' — ' + job.company;
     reason.textContent = job.reason + ((job.related_job_ids || []).length > 1 ? ' — ' + job.related_job_ids.length + ' listings / 1 ATS application' : '');
     row.append(title, reason);
@@ -828,7 +876,8 @@ async function refreshDeferred() {
       if (result.error) return err('review_message', result);
       await refreshDeferred();
     };
-    row.append(open);
+    const actions = document.createElement('div'); actions.className = 'row';
+    actions.append(open);
     if (job.can_assist) {
       const website = document.createElement('button'); website.className = 'secondary'; website.textContent = t('review_external');
       website.onclick = async () => {
@@ -836,9 +885,9 @@ async function refreshDeferred() {
         const result = await api('/api/deferred/open', {job_id: job.job_id});
         if (result.error) err('review_message', result);
       };
-      row.append(website);
+      actions.append(website);
     }
-    row.append(sent); root.append(row);
+    actions.append(sent); row.append(actions); root.append(row);
     }
   }
 }
