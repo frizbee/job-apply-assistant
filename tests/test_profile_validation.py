@@ -269,6 +269,24 @@ class ProfileBoundaryTests(SafetyTest):
             self.assertEqual(apply.SETTINGS, before)
         self.thread.assert_not_called()
 
+    def test_question_presets_are_saved_with_cv_and_can_be_cleared(self):
+        body = self.body()
+        body['question_presets'] = [{'question': 'Will you require visa sponsorship?', 'answer': 'No'}]
+        with patch.object(apply, 'finalize_settings'):
+            self.assertEqual(gui.start(body), {'ok': True})
+        self.assertEqual(apply.SETTINGS['question_presets'], body['question_presets'])
+        self.assertEqual(apply.SETTINGS['question_presets_cv_hash'], body['cv_hash'])
+        gui.clear_cv_profile()
+        self.assertNotIn('question_presets', apply.SETTINGS)
+
+    def test_invalid_question_presets_do_not_publish_settings(self):
+        before = copy.deepcopy(apply.SETTINGS)
+        body = self.body()
+        body['question_presets'] = [{'question': 'Anything?', 'answer': True}]
+        self.assertEqual(gui.start(body)['error'], 'invalid_settings')
+        self.assertEqual(apply.SETTINGS, before)
+        self.thread.assert_not_called()
+
     def test_gui_salary_rejects_invalid_values_without_changing_settings(self):
         before = copy.deepcopy(apply.SETTINGS)
         for field, value in [('currency', 'XYZ'), ('salary', '-5000'), ('salary', '5,000'),

@@ -25,6 +25,7 @@ import llm_credentials
 
 TOKEN = secrets.token_urlsafe(16)
 STATE = {"running": False, "analyzing": False}
+REVIEW_SESSION = None
 # A plain Lock may be released by the worker that receives the reservation.
 # It covers preparation and the whole run, not just Thread.start().
 ACTIVITY_LOCK = threading.Lock()
@@ -75,6 +76,9 @@ def resume_hash(path: Path | None = None) -> str:
 def clear_cv_profile() -> None:
     apply.SETTINGS.pop('cv_profile', None)
     apply.SETTINGS.pop('cv_hash', None)
+    apply.SETTINGS.pop('question_presets', None)
+    apply.SETTINGS.pop('question_presets_cv_hash', None)
+    apply.SETTINGS.pop('replace_prefilled_contacts', None)
 
 
 def state() -> dict:
@@ -107,7 +111,9 @@ def state() -> dict:
         except llm_credentials.CredentialError:
             credentials[provider] = {'provider': provider, 'has_key': False, 'source': 'error'}
     return {
-        "settings": {k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode", "target_technologies", "excluded_technologies", "excluded_title_words")},
+        "settings": {**{k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode", "target_technologies", "excluded_technologies", "excluded_title_words", "replace_prefilled_contacts")},
+                     'question_presets': s.get('question_presets', []) if prof is not None and s.get('question_presets_cv_hash') == digest else []},
+        'question_templates': apply.application_answers.TEMPLATES,
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
         "profile": prof,
         "profile_error": profile_error,
@@ -217,26 +223,41 @@ def _analyze(body: dict) -> dict:
     return {"ok": True, "profile": prof, "cv_hash": digest, "cv_name": resume.name}
 
 
-def start(body: dict) -> dict:
+def start(body: dict, *, review_job_id: str | None = None) -> dict:
+    global REVIEW_SESSION
     if not begin_activity("running"):
         return busy_error()
     handed_off = False
     snapshot = None
     try:
+        review_row = None
+        if review_job_id is not None:
+            if not isinstance(review_job_id, str):
+                return {'error': 'invalid_review_job'}
+            review_row = next((row for row in deferred_jobs()['jobs'] if row['job_id'] == review_job_id), None)
+            if review_row is None or not review_row['can_assist']:
+                return {'error': 'review_unavailable'}
         snapshot = (copy.deepcopy(apply.SETTINGS), copy.deepcopy(apply.CFG), copy.deepcopy(apply.PROFILE),
                     apply.DRY_RUN, list(apply.LOG_LINES), apply.CFG.get("profile") is apply.PROFILE)
         result = _prepare_start(body)
         if "error" in result:
             return result
         accepted_resume, accepted_hash = Path(apply.SETTINGS['resume']), apply.SETTINGS['cv_hash']
+        REVIEW_SESSION = apply.deferred_review.Session(review_job_id, apply.DRY_RUN, accepted_hash) if review_row else None
+        session = REVIEW_SESSION
 
         def worker():
             try:
                 if not apply.STOP.is_set() and resume_hash(accepted_resume) != accepted_hash:
                     raise RuntimeError('CV changed before the worker started; review the new CV first')
-                apply.run_bot(reset_stop=False)  # Preserve Stop received while this worker was queued.
+                if session is not None:
+                    apply.deferred_review.run(apply, review_row, session)
+                else:
+                    apply.run_bot(reset_stop=False)  # Preserve Stop received while this worker was queued.
             except BaseException as e:  # The reservation must also survive STOP/browser closure.
                 apply.log(f"ERROR: {e}")
+                if session is not None:
+                    session.finish('review_stopped; check history before retrying')
             finally:
                 finish_activity("running")
 
@@ -263,7 +284,47 @@ def start(body: dict) -> dict:
         return {"error": "startup_failed", "detail": detail}
     finally:
         if not handed_off:
+            if REVIEW_SESSION is not None:
+                REVIEW_SESSION.finish('not_started')
             finish_activity("running")
+
+
+def deferred_jobs() -> dict:
+    jobs = apply.deferred_review.queue(apply.load_applied(), apply.MANUAL_FILE)
+    for row in jobs:
+        row['can_assist'] = row['job_id'].isdigit() or apply.ats_provider(row['apply_url']) is not None
+    return {'jobs': jobs}
+
+
+def review_action(body: dict) -> dict:
+    if not isinstance(body, dict) or REVIEW_SESSION is None:
+        return {'error': 'review_not_waiting'}
+    return REVIEW_SESSION.action(body.get('action'), body.get('step'))
+
+
+def deferred_external(body: dict, *, mark_sent: bool = False) -> dict:
+    if not begin_activity():
+        return busy_error()
+    try:
+        job_id = body.get('job_id') if isinstance(body, dict) else None
+        row = next((r for r in deferred_jobs()['jobs'] if r['job_id'] == job_id), None)
+        if row is None:
+            return {'error': 'review_unavailable'}
+        if mark_sent:
+            history = apply.load_applied()
+            if history.get(job_id, {}).get('status') not in apply.deferred_review.DEFERRED:
+                return {'error': 'review_unavailable'}
+            # Back up before resolving a deferred item into a protected state.
+            apply.job_rechecks.backup([apply.APPLIED_FILE, apply.LOG_FILE, apply.MANUAL_FILE], apply.HOME / 'data' / 'backups')
+            apply.record_manual(job_id, row['title'], row['company'], row['apply_url'], 'User reported sending outside the app; outcome not independently confirmed')
+            apply.record(history, job_id, row['title'], row['company'], 'submission_unconfirmed', row['job_url'])
+        else:
+            if not apply.safe_https_url(row['apply_url']):
+                return {'error': 'review_unavailable'}
+            webbrowser.open(row['apply_url'])
+        return {'ok': True}
+    finally:
+        finish_activity()
 
 
 def _prepare_start(body: dict) -> dict:
@@ -312,8 +373,13 @@ def _prepare_start(body: dict) -> dict:
     if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
     technology_settings = {field: body.get(field, s.get(field, [])) for field in apply.job_relevance.USER_FIELDS}
+    replace_contacts = body.get('replace_prefilled_contacts', False)
+    if type(replace_contacts) is not bool:
+        return {'error': 'invalid_settings', 'detail': 'replace_prefilled_contacts: expected boolean'}
+    presets = body.get('question_presets', s.get('question_presets', []) if s.get('question_presets_cv_hash') == digest else [])
     try:
         apply.job_relevance.validate_settings(technology_settings)
+        apply.application_answers.validate_presets(presets)
     except ValueError as e:
         return {'error': 'invalid_settings', 'detail': str(e)}
     # Monthly expectations in the user's currency, EUR and USD; annual salary is the FX base.
@@ -342,6 +408,8 @@ def _prepare_start(body: dict) -> dict:
               locations=list(body["locations"]),
                sources=body["sources"], test_mode=body["test_mode"])
     s.update({field: [term.strip() for term in terms] for field, terms in technology_settings.items()})
+    s.update(question_presets=[dict(entry) for entry in presets], question_presets_cv_hash=digest)
+    s['replace_prefilled_contacts'] = replace_contacts
     for name in SOURCE_NAMES:
         apply.CFG["sources"][name] = name in body["sources"]
     apply.DRY_RUN = s["test_mode"]
@@ -369,10 +437,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, b"{}")
         if self.path == "/api/state":
             return self.send(200, json.dumps(state()).encode())
+        if self.path == '/api/deferred':
+            return self.send(200, json.dumps(deferred_jobs()).encode())
         m = re.match(r"/api/log\?from=(\d+)", self.path)
         if m:
             i = int(m.group(1))
-            return self.send(200, json.dumps({"lines": apply.LOG_LINES[i:], "running": STATE["running"]}).encode())
+            return self.send(200, json.dumps({"lines": apply.LOG_LINES[i:], "running": STATE["running"],
+                                            'review': REVIEW_SESSION.public() if REVIEW_SESSION else None}).encode())
         self.send(404, b"{}")
 
     def do_POST(self):
@@ -383,6 +454,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/cv": lambda: save_cv(body),
             "/api/analyze": lambda: analyze(body),
             "/api/start": lambda: start(body),
+            '/api/review/start': lambda: start(body, review_job_id=body.get('job_id', '') if isinstance(body, dict) else ''),
+            '/api/review/action': lambda: review_action(body),
+            '/api/deferred/open': lambda: deferred_external(body),
+            '/api/deferred/mark-sent': lambda: deferred_external(body, mark_sent=True),
             "/api/stop": lambda: (apply.STOP.set(), {"ok": True})[1],
             "/api/open": lambda: (open_folder(apply.HOME / body.get("folder", "data")), {"ok": True})[1],
             "/api/quit": lambda: (apply.STOP.set(), threading.Timer(0.5, lambda: os._exit(0)).start(), {"ok": True})[2],
@@ -465,6 +540,7 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
     <div><label>LinkedIn</label><input type="text" id="linkedin"></div>
     <div><label data-t="github"></label><input type="text" id="github"></div>
   </div>
+  <div class="checks"><label><input type="checkbox" id="replace_prefilled_contacts"> <span data-t="replace_prefilled_contacts"></span></label></div>
   <label data-t="titles"></label><textarea id="job_titles"></textarea>
   <label data-t="excluded_title_words"></label><textarea id="excluded_title_words" style="min-height:60px"></textarea>
   <p class="hint" data-t="excluded_title_hint"></p>
@@ -485,6 +561,8 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
   <p class="hint" data-t="salary_hint" style="margin:6px 0 0"></p>
   <label data-t="english"></label><select id="english"></select>
   <label data-t="cover"></label><textarea id="cover_letter"></textarea>
+  <h3 data-t="question_presets_title"></h3><p class="hint" data-t="question_presets_hint"></p>
+  <div id="question_presets"></div>
 </section>
 
 <section class="card hidden" id="s3">
@@ -501,6 +579,18 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
 <section class="card hidden" id="s4">
   <h2 data-t="progress"></h2><div id="log"></div>
 </section>
+<section class="card" id="deferred">
+  <h2 data-t="deferred_title"></h2><p class="hint" data-t="deferred_hint"></p>
+  <button class="secondary" id="refresh_deferred" data-t="refresh_deferred"></button>
+  <div id="deferred_jobs"></div>
+  <div id="review_panel" class="hidden">
+    <p id="review_status"></p><pre id="review_issues" style="white-space:pre-wrap"></pre>
+    <p class="hint" data-t="review_browser_hint"></p>
+    <button id="review_continue" data-t="review_continue"></button>
+    <button class="secondary" id="review_skip" data-t="review_skip"></button>
+  </div>
+  <div class="msg" id="review_message"></div>
+</section>
 </main>
 <script>
 const TOKEN = "__TOKEN__";
@@ -513,6 +603,10 @@ const T = {
   analyze:"Read my CV", manual:"Skip, I'll fill it in myself", analyzing:"Reading your CV... this can take up to a minute.",
   analyzed:"Done. Please check your details below.", step2:"Step 2", review_title:"Check your details", review_hint:"These are used to search jobs and fill application forms. Fix anything that is wrong.",
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", phone_country_code:"Phone country calling code", phone_national:"Phone number (without country calling code)", phone_saved:"Previously saved full phone number", phone_split_hint:"Confirm the calling code and remaining number separately. An unsplit old number is shown for reference only; no code is guessed from your location.", city:"City, Country", country:"Country", github:"GitHub / portfolio",
+  question_presets_title:"Common questions: 10 reviewed answer templates", question_presets_hint:"Edit each question to match the employer's wording and enter your own confirmed answer (Yes/No for binary questions). Blank answers remain manual. Matching is exact apart from case, whitespace and the required-field asterisk. Country/company-specific questions are not generalized. Saved with this CV; no automatic Yes answers.",
+  replace_prefilled_contacts:"Replace site-prefilled name, email and phone with my reviewed profile values when they differ. Check your profile carefully before enabling.",
+  err_review_unavailable:"The deferred queue or selected application is unavailable.", err_invalid_review_job:"Choose a deferred application.", err_review_not_waiting:"This review step has changed. Wait for the current step.", err_invalid_review_action:"Unknown review action.",
+  deferred_title:"Deferred applications", deferred_hint:"Incomplete forms do not stop bulk processing. Review them one at a time afterwards. The current CV/profile and Test mode checkbox above apply to assisted review. A website draft is not guaranteed to survive reopening.", refresh_deferred:"Refresh queue", review_open:"Review this application", review_external:"Open website manually", review_mark_sent:"I submitted outside the app", review_continue:"I checked this step — check and continue", review_skip:"Skip for now", review_browser_hint:"Fill the current step in Chrome, then confirm here. Do not click Submit in Chrome. Your confirmation applies only to this step; it does not save general answers. LIVE review asks for a separate final confirmation.", review_live_confirm:"LIVE review may send this one application after your final confirmation. Continue?", review_external_confirm:"This opens your regular browser outside Test mode. Any sending there is your own manual action. Continue?", review_sent_confirm:"Did you submit this application outside the app? It will be marked UNCONFIRMED and protected against retries, not counted as confirmed success.", review_unavailable:"This item is no longer available for review.",
   titles:"Job titles to apply for (one per line)", locations:"Countries / regions to search (one per line)", years:"Years of experience", salary:"Monthly salary expectation (your currency)", salary_eur:"Monthly salary expectation in EUR", salary_usd:"Monthly salary expectation in USD",
   target_technologies:"Target technologies (one per line; advisory)", excluded_technologies:"Excluded technologies (one per line)", technology_hint:"Missing target technology evidence does not block application processing. Explicit exclusions still apply to the role title or mandatory requirements, not nice-to-have skills. Terms are literal, not regex. No automatic aliases or technology lists.",
   excluded_title_words:"Excluded words / phrases in job titles (one per line)", excluded_title_hint:"Optional; empty means no exclusions. Matches only the job title, not the description. Literal, case-insensitive terms, not regex; no built-in list.",
@@ -539,6 +633,10 @@ const T = {
   analyze:"CV'mi oku", manual:"Geç, kendim dolduracağım", analyzing:"CV okunuyor... bir dakika kadar sürebilir.",
   analyzed:"Tamam. Aşağıdaki bilgileri kontrol et.", step2:"Adım 2", review_title:"Bilgilerini kontrol et", review_hint:"İş aramak ve başvuru formlarını doldurmak için kullanılır. Yanlış olanı düzelt.",
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", phone_country_code:"Telefon ülke arama kodu", phone_national:"Telefon numarası (ülke arama kodu olmadan)", phone_saved:"Önceden kaydedilmiş tam telefon numarası", phone_split_hint:"Arama kodunu ve kalan numarayı ayrı ayrı doğrulayın. Eski numara yalnızca referans içindir; konumunuzdan kod tahmin edilmez.", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
+  question_presets_title:"Sık sorulan sorular: 10 onaylı yanıt şablonu", question_presets_hint:"Soruyu işverenin metnine göre düzenleyin ve onayladığınız yanıtı girin (ikili sorular için Yes/No). Boş yanıtlar manuel kalır. Eşleşme yalnızca harf boyutu, boşluk ve zorunlu alan yıldızını yok sayar. Ülkeye/şirkete özel sorular genelleştirilmez. Bu CV ile kaydedilir; otomatik Yes yanıtı yoktur.",
+  replace_prefilled_contacts:"Sitenin önceden doldurduğu ad, e-posta ve telefonu farklıysa onayladığım profil değerleriyle değiştir. Etkinleştirmeden önce profilinizi dikkatlice kontrol edin.",
+  err_review_unavailable:"Ertelenen kuyruk veya seçili başvuru kullanılamıyor.", err_invalid_review_job:"Ertelenen bir başvuru seçin.", err_review_not_waiting:"İnceleme adımı değişti. Geçerli adımı bekleyin.", err_invalid_review_action:"Bilinmeyen inceleme işlemi.",
+  deferred_title:"Ertelenen başvurular", deferred_hint:"Eksik formlar toplu işlemi durdurmaz. Daha sonra tek tek inceleyin. Yukarıdaki güncel CV/profil ve Test modu seçimi geçerlidir. Site taslağının korunması garanti edilmez.", refresh_deferred:"Kuyruğu yenile", review_open:"Başvuruyu incele", review_external:"Siteyi manuel aç", review_mark_sent:"Uygulama dışında gönderdim", review_continue:"Bu adımı kontrol ettim — kontrol et ve devam et", review_skip:"Şimdilik atla", review_browser_hint:"Geçerli adımı Chrome'da doldurun ve burada onaylayın. Chrome'da Submit'e basmayın. Onay yalnızca bu adıma uygulanır; genel yanıt kaydetmez. CANLI modda ayrıca son onay istenir.", review_live_confirm:"CANLI inceleme, son onayınızdan sonra bu başvuruyu gönderebilir. Devam edilsin mi?", review_external_confirm:"Normal tarayıcınız Test modu dışında açılır. Buradaki gönderimler sizin manuel işleminizdir. Devam edilsin mi?", review_sent_confirm:"Bu başvuruyu uygulama dışında gönderdiniz mi? Doğrulanmamış olarak işaretlenecek ve tekrar denemeye karşı korunacaktır; doğrulanmış başarı sayılmaz.", review_unavailable:"Bu başvuru artık incelemeye uygun değil.",
   titles:"Başvurulacak pozisyonlar (her satıra bir tane)", locations:"Aranacak ülkeler / bölgeler (her satıra bir tane)", years:"Deneyim (yıl)", salary:"Aylık maaş beklentisi (kendi para birimin)", salary_eur:"Aylık maaş beklentisi (EUR)", salary_usd:"Aylık maaş beklentisi (USD)",
   target_technologies:"Hedef teknolojiler (her satıra bir tane; bilgi amaçlı)", excluded_technologies:"Hariç tutulan teknolojiler (her satıra bir tane)", technology_hint:"Hedef teknoloji kanıtının bulunmaması başvurunun işlenmesini engellemez. Açık hariç tutmalar pozisyon başlığına veya zorunlu gereksinimlere uygulanır; isteğe bağlı becerilere uygulanmaz. Terimler regex değildir; otomatik teknoloji listesi veya takma ad eklenmez.",
   excluded_title_words:"Pozisyon başlığında hariç tutulan kelimeler / ifadeler (her satıra bir tane)", excluded_title_hint:"İsteğe bağlı; boş liste hariç tutmaz. Yalnızca başlıkta aranır, açıklamada değil. Büyük/küçük harfe duyarsızdır; regex veya yerleşik liste değildir.",
@@ -560,7 +658,7 @@ const T = {
 };
 const SOURCES = { linkedin:"LinkedIn (Easy Apply)", wellfound:"Wellfound", indeed:"Indeed", remoteok:"Remote OK", himalayas:"Himalayas", weworkremotely:"We Work Remotely" };
 const validLanguage = value => Object.prototype.hasOwnProperty.call(T, value);
-let lang = "en", S = null, logFrom = 0, poll = null, uiClosed = false;
+let lang = "en", S = null, logFrom = 0, poll = null, uiClosed = false, activeReview = null;
 try {
   const saved = localStorage.getItem("lang");
   if (validLanguage(saved)) lang = saved;
@@ -588,12 +686,26 @@ async function api(path, body) {
 function msg(id, text, cls) { const e = $(id); e.textContent = text; e.className = "msg " + (cls || ""); }
 function err(id, r) { msg(id, t("err_" + r.error) + (r.detail ? " (" + r.detail + ")" : ""), "err"); }
 function fill(p, show = true) {
+  const reviewedPresets = p ? (S.settings.question_presets || []) : [];
   p = p || {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) $(k).value = p[k] ?? "";
   const parts = (p.phone_intl || "").match(/^\s*\+([1-9]\d{0,2})[\s-]+([\d\s().-]+)\s*$/);
   $("phone_country_code").value = parts ? "+" + parts[1] : "";
   $("phone_national").value = parts ? parts[2].replace(/\D/g, "") : "";
+  $("replace_prefilled_contacts").checked = !!p.phone_intl && S.settings.replace_prefilled_contacts === true;
   $("job_titles").value = (p.job_titles || []).join("\n");
+  $("question_presets").replaceChildren();
+  const templates = S.question_templates || [];
+  for (let i = 0; i < 10; i++) {
+    const row = document.createElement("div"), question = document.createElement("input"), answer = document.createElement("textarea");
+    row.className = "question-preset";
+    question.className = "preset-question"; question.value = reviewedPresets[i]?.question ?? templates[i] ?? "";
+    question.setAttribute("aria-label", "Question " + (i + 1));
+    answer.className = "preset-answer"; answer.value = reviewedPresets[i]?.answer ?? "";
+    answer.setAttribute("aria-label", "Confirmed answer " + (i + 1));
+    answer.style.minHeight = "50px";
+    row.append(question, answer); $("question_presets").append(row);
+  }
   if (show) { $("s2").classList.remove("hidden"); $("s3").classList.remove("hidden"); }
 }
 async function load() {
@@ -617,6 +729,7 @@ async function load() {
   if (S.llm_error) err("m1", { error: "invalid_llm_config", detail: S.llm_error });
   else if (S.llm && !S.llm.available) err("m1", { error: "llm_not_implemented" });
   if (S.running) watch();
+  await refreshDeferred();
   render();
 }
 $("drop").onclick = () => $("file").click();
@@ -627,7 +740,7 @@ $("file").onchange = async () => {
   if (r.error) return err("m1", r);
   S.cv_name = r.cv_name; S.cv_hash = r.cv_hash;
   $("cvname").textContent = r.cv_name; $("drop").classList.add("has");
-  if (r.profile_reset) { S.profile = null; fill(null); msg("m1", t("cv_replaced")); }
+  if (r.profile_reset) { S.profile = null; S.settings.question_presets = []; S.settings.replace_prefilled_contacts = false; fill(null); msg("m1", t("cv_replaced")); }
   else msg("m1", "");
 };
 $("analyze").onclick = async () => {
@@ -647,16 +760,22 @@ $("analyze").onclick = async () => {
 $("changekey").onclick = () => { $("keybox").classList.remove("hidden"); $("changekey").classList.add("hidden"); $("key").focus(); };
 $("manual").onclick = () => { fill(S.profile); $("s2").scrollIntoView({ behavior: "smooth" }); };
 const lines = id => $(id).value.split("\n").map(s => s.trim()).filter(Boolean);
-$("start").onclick = async () => {
+function startBody() {
   const profile = {};
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
   const body = { profile, cv_hash: S.cv_hash, locations: lines("locations"), salary: $("salary").value, currency: $("currency").value,
+    question_presets: [...document.querySelectorAll(".question-preset")].map(row => ({ question: row.querySelector(".preset-question").value.trim(), answer: row.querySelector(".preset-answer").value.trim() })).filter(entry => entry.question || entry.answer),
     phone_country_code: $("phone_country_code").value.trim(), phone_national: $("phone_national").value.trim(),
+    replace_prefilled_contacts: $("replace_prefilled_contacts").checked,
     target_technologies: lines("target_technologies"), excluded_technologies: lines("excluded_technologies"),
     excluded_title_words: lines("excluded_title_words"),
     salary_eur: $("salary_eur").value, salary_usd: $("salary_usd").value, notice: $("notice").value, english: $("english").value,
     sources: [...document.querySelectorAll("#sources input:checked")].map(e => e.value), test_mode: $("test_mode").checked };
+  return body;
+}
+$("start").onclick = async () => {
+  const body = startBody();
   document.querySelectorAll("input.missing").forEach(e => e.classList.remove("missing"));
   const r = await api("/api/start", body);
   if (r.error === "cv_changed") { await load(); S.profile = null; fill(null); }
@@ -671,6 +790,67 @@ $("quit").onclick = async () => {
   document.body.innerHTML = `<main><h1>Auto Apply</h1><p>${t("quit_done")}</p></main>`;
 };
 $("results").onclick = () => api("/api/open", { folder: "data" });
+async function refreshDeferred() {
+  let r;
+  try { r = await api('/api/deferred'); }
+  catch (error) { if (!uiClosed) err('review_message', {error: 'review_unavailable'}); return; }
+  if (uiClosed) return;
+  const root = $('deferred_jobs'); root.replaceChildren();
+  for (const job of (r.jobs || [])) {
+    const row = document.createElement('div'), title = document.createElement('h3'), reason = document.createElement('p');
+    title.textContent = job.title + ' — ' + job.company;
+    reason.textContent = job.reason;
+    row.append(title, reason);
+    const open = document.createElement('button'); open.className = 'secondary';
+    open.textContent = t(job.can_assist ? 'review_open' : 'review_external');
+    open.onclick = async () => {
+      if (job.can_assist) {
+        if (!$('test_mode').checked && !confirm(t('review_live_confirm'))) return;
+        const result = await api('/api/review/start', {...startBody(), job_id: job.job_id});
+        if (result.error) return err('review_message', result);
+        logFrom = 0; $('log').textContent = ''; watch();
+      } else {
+        if (!confirm(t('review_external_confirm'))) return;
+        const result = await api('/api/deferred/open', {job_id: job.job_id});
+        if (result.error) err('review_message', result);
+      }
+    };
+    const sent = document.createElement('button'); sent.className = 'secondary'; sent.textContent = t('review_mark_sent');
+    sent.onclick = async () => {
+      if (!confirm(t('review_sent_confirm'))) return;
+      const result = await api('/api/deferred/mark-sent', {job_id: job.job_id});
+      if (result.error) return err('review_message', result);
+      await refreshDeferred();
+    };
+    row.append(open);
+    if (job.can_assist) {
+      const website = document.createElement('button'); website.className = 'secondary'; website.textContent = t('review_external');
+      website.onclick = async () => {
+        if (!confirm(t('review_external_confirm'))) return;
+        const result = await api('/api/deferred/open', {job_id: job.job_id});
+        if (result.error) err('review_message', result);
+      };
+      row.append(website);
+    }
+    row.append(sent); root.append(row);
+  }
+}
+function showReview(review) {
+  activeReview = review;
+  $('review_panel').classList.toggle('hidden', !review);
+  if (!review) return;
+  $('review_status').textContent = (review.test_mode ? 'TEST — ' : 'LIVE — ') + review.phase + (review.result ? ': ' + review.result : '');
+  $('review_issues').textContent = review.issues.join('\n');
+  $('review_continue').disabled = $('review_skip').disabled = review.phase !== 'waiting';
+}
+async function reviewCommand(action) {
+  if (!activeReview) return;
+  const result = await api('/api/review/action', {action, step: activeReview.step});
+  if (result.error) err('review_message', result);
+}
+$('refresh_deferred').onclick = refreshDeferred;
+$('review_continue').onclick = () => reviewCommand('continue');
+$('review_skip').onclick = () => reviewCommand('skip');
 function watch() {
   if (uiClosed) return;
   $("s4").classList.remove("hidden"); $("start").disabled = true; $("stop").classList.remove("hidden"); msg("m3", t("running"));
@@ -680,8 +860,9 @@ function watch() {
     try { r = await api("/api/log?from=" + logFrom); }
     catch (error) { if (uiClosed) return; throw error; }
     if (uiClosed) return; // An in-flight response may arrive after the UI has closed.
+    showReview(r.review || null);
     if (r.lines.length) { logFrom += r.lines.length; const l = $("log"); l.textContent += r.lines.join("\n") + "\n"; l.scrollTop = l.scrollHeight; }
-    if (!r.running) { clearInterval(poll); $("start").disabled = false; $("stop").classList.add("hidden"); msg("m3", t("finished"), "ok"); }
+    if (!r.running) { clearInterval(poll); $("start").disabled = false; $("stop").classList.add("hidden"); msg("m3", t("finished"), "ok"); await refreshDeferred(); }
   }, 1500);
 }
 document.querySelectorAll(".lang button[data-l]").forEach(b => b.onclick = () => {

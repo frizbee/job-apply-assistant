@@ -38,7 +38,8 @@ class PhoneGuiTests(unittest.TestCase):
             def route(request):
                 if request.request.url.endswith('/api/state'):
                     request.fulfill(content_type='application/json', body=json.dumps({
-                        'settings': {}, 'profile': None, 'default_locations': ['User region']}))
+                        'settings': {}, 'profile': None, 'default_locations': ['User region'],
+                        'question_templates': gui.apply.application_answers.TEMPLATES}))
                 elif request.request.url.endswith('/api/start'):
                     sent.append(request.request.post_data_json)
                     request.fulfill(content_type='application/json', body='{"error":"invalid_profile"}')
@@ -56,8 +57,12 @@ class PhoneGuiTests(unittest.TestCase):
             self.assertEqual(page.locator('#phone_intl').input_value(), '+905551234567')
             page.locator('#phone_country_code').fill('+90')
             page.locator('#phone_national').fill('5551234567')
+            self.assertEqual(page.locator('.question-preset').count(), 10)
+            self.assertEqual(page.locator('.preset-answer').first.input_value(), '')
+            page.locator('.preset-answer').first.fill('Test nationality')
             page.locator('#start').click()
             page.wait_for_function('document.getElementById("m3").textContent.length > 0')
             self.assertEqual(sent[0]['phone_country_code'], '+90')
             self.assertEqual(sent[0]['phone_national'], '5551234567')
+            self.assertEqual(sent[0]['question_presets'][0]['answer'], 'Test nationality')
             browser.close()

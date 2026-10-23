@@ -37,6 +37,8 @@ import job_metadata
 import job_relevance
 import job_rechecks
 import linkedin_search
+import application_answers
+import deferred_review
 from run_metrics import RunMetrics
 
 METRICS = RunMetrics()
@@ -357,8 +359,14 @@ def answer(question: str, numeric: bool = False) -> list[str]:
         values = exact if isinstance(exact, list) else [exact]
         result = [str(v) for v in values if v is not None and str(v).strip()]
         return [v for v in result if re.fullmatch(r"\d+(?:\.\d+)?", v)] if numeric else result
+    reviewed = application_answers.preset_answer(question, SETTINGS)
+    if reviewed:
+        return [v for v in reviewed if re.fullmatch(r'\d+(?:\.\d+)?', v)] if numeric else reviewed
     if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
         return []
+    contact = application_answers.contact_answers(question, PROFILE)
+    if contact:
+        return [v for v in contact if re.fullmatch(r'\d+(?:\.\d+)?', v)] if numeric else contact
     for rule in CFG["answers"]:
         if re.search(rule["match"], q):
             ans = rule["answer"]
@@ -555,6 +563,9 @@ def choose_option(question: str, options: list[str]) -> int | None:
     opts = [(i, o.strip()) for i, o in enumerate(options) if o.strip() and not PLACEHOLDER_RE.search(o)]
     if not opts:
         return None
+    if application_answers.contact_kind(question) == 'country_code':
+        exact = match_option(answer(question), options)
+        return exact if exact is not None else application_answers.country_code_option(answer(question), options)
     if YEARS_RE.search(question) or EXPERIENCE_RE.search(question):
         years = answer(question, numeric=True)
         idx = choose_years(float(years[0]), opts) if years else None
@@ -759,7 +770,8 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
     try:
         click_form_control(el)
         pause(0.5, 1)
-        if std:
+        phone_country = is_phone_country_control(el, q)
+        if std and not phone_country and application_answers.contact_kind(q) != 'country_code':
             el.fill(std.split(",")[0])
             pause(1.5, 2.5)
         opts = page.locator("[role='option']:visible")
@@ -767,13 +779,16 @@ def fill_combobox(page: Page, el: Locator, q: str) -> bool:
         if not texts:
             el.press("Escape")
             return False
-        idx = choose_option(q, texts) if not std else match_option(cands, texts)
+        if phone_country:
+            idx = application_answers.country_code_option(cands, texts)
+        else:
+            idx = choose_option(q, texts) if not std or application_answers.contact_kind(q) == 'country_code' else match_option(cands, texts)
         if idx is None:
             el.press("Escape")
             return False
         click_form_control(opts.nth(idx))
         pause(0.3, 0.7)
-        return True
+        return combobox_value_confirmed(el, q, cands)
     except Exception as e:
         if browser_closed(e):
             raise BrowserClosed() from None
@@ -946,7 +961,11 @@ def unconfirmed_checkbox_questions(scope: Locator) -> list[str]:
     # A group can shrink to one input after filling. Do not let that remaining
     # value bypass verification merely because it is no longer a multi-select.
     for cb in scope.locator("input[type='checkbox']").all():
-        if cb.get_attribute('id') == 'follow-company-checkbox' or cb.is_disabled():
+        if cb.is_disabled():
+            continue
+        if is_optional_follow_checkbox(cb):
+            if cb.is_checked():
+                issues.append('company follow preference was not cleared')
             continue
         if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
             continue
@@ -959,6 +978,12 @@ def unconfirmed_checkbox_questions(scope: Locator) -> list[str]:
         if pick is None or state is not (pick == 0):
             issues.append(q or 'checkbox')
     return issues
+
+
+def is_optional_follow_checkbox(cb: Locator) -> bool:
+    return (cb.get_attribute('id') == 'follow-company-checkbox'
+            or (re.fullmatch(r'Follow .+ to stay up to date with their page', question_of(cb).strip(), re.I) is not None
+                and not cb.evaluate("e => e.required || e.getAttribute('aria-required') === 'true'")))
 
 
 def fill_checkgroups(scope: Locator) -> list[str]:
@@ -1014,6 +1039,19 @@ def standard_answer(el: Locator, q: str) -> str | None:
     """Resolve standard external fields such as name, email and phone."""
     if SENSITIVE_RE.search(q) or NARRATIVE_RE.search(q):
         return None
+    if is_phone_country_control(el, q):
+        return PROFILE.get('country_code') or None
+    kind = application_answers.contact_kind(q)
+    if kind == 'country_code':
+        return PROFILE.get('country_code') or None
+    if kind == 'phone':
+        separate_code = el.evaluate(r"""e => {
+            const root = e.closest('form') || e.closest('[role=dialog]');
+            return root && [...root.querySelectorAll('select,[role=combobox]')].some(c =>
+                (c.id === 'country' && e.id === 'phone' && e.type === 'tel') ||
+                /country (calling )?code/i.test(c.getAttribute('aria-label') || [...(c.labels || [])].map(l=>l.textContent).join(' ')));
+        }""")
+        return PROFILE.get('phone' if separate_code is True else 'phone_intl') or None
     key = " ".join([q, el.get_attribute("name") or "", el.get_attribute("id") or "",
                     el.get_attribute("autocomplete") or ""]).lower()
     for pattern, field in STANDARD_FIELDS:
@@ -1022,10 +1060,27 @@ def standard_answer(el: Locator, q: str) -> str | None:
     return None
 
 
+def is_phone_country_control(el: Locator, question: str) -> bool:
+    if application_answers.question_key(question) != 'country':
+        return False
+    return el.evaluate("e => e.id === 'country' && e.getAttribute('role') === 'combobox' && !!e.closest('form')?.querySelector('#phone[type=tel]')") is True
+
+
+def combobox_value_confirmed(el: Locator, question: str, candidates: list[str]) -> bool:
+    # React-select clears the search input after choosing. Verify the displayed
+    # single value in this control, never an option elsewhere on the page.
+    selected = el.evaluate("e => e.closest('.select__control')?.querySelector('.select__single-value')?.textContent || ''")
+    if not selected:
+        return text_value_confirmed(el.input_value(), candidates, question=question)
+    if is_phone_country_control(el, question) or application_answers.contact_kind(question) == 'country_code':
+        return application_answers.country_code_option(candidates, [selected]) == 0
+    return match_option(candidates, [selected]) == 0
+
+
 TEXT_FIELDS = (
-    "input[type='text']:visible, input[type='tel']:visible, input[type='email']:visible, "
-    "input[type='number']:visible, input[type='url']:visible, input[type='date']:visible, "
-    "input:not([type]):visible, textarea:visible"
+    "input[type='text']:visible:not([aria-hidden='true']), input[type='tel']:visible:not([aria-hidden='true']), input[type='email']:visible:not([aria-hidden='true']), "
+    "input[type='number']:visible:not([aria-hidden='true']), input[type='url']:visible:not([aria-hidden='true']), input[type='date']:visible:not([aria-hidden='true']), "
+    "input:not([type]):visible:not([aria-hidden='true']), textarea:visible:not([aria-hidden='true'])"
 )
 
 
@@ -1033,6 +1088,11 @@ def text_field_candidates(el: Locator, q: str, *, external: bool) -> list[str]:
     # An exact user-confirmed answer also overrides generic identity-field rules.
     if any(key.strip().casefold() == q.strip().casefold() for key in CFG.get('confirmed_answers', {})):
         return answer(q, numeric=el.get_attribute('type') == 'number')
+    if application_answers.preset_answer(q, SETTINGS):
+        return answer(q, numeric=el.get_attribute('type') == 'number')
+    kind = application_answers.contact_kind(q)
+    if kind and not external:
+        return answer(q)
     std = standard_answer(el, q) if external else None
     if std:
         return [std]
@@ -1040,11 +1100,17 @@ def text_field_candidates(el: Locator, q: str, *, external: bool) -> list[str]:
     return answer(q, numeric=numeric)
 
 
-def text_value_confirmed(value: str, candidates: list[str], *, numeric: bool = False) -> bool:
+def text_value_confirmed(value: str, candidates: list[str], *, numeric: bool = False, question: str = '') -> bool:
     """Accept only a known value, not merely nonempty/native-valid text."""
     value = value.replace('\r\n', '\n').strip()
     if not value:
         return False
+    kind = application_answers.contact_kind(question)
+    if kind == 'email':
+        return any(value.casefold() == candidate.strip().casefold() for candidate in candidates)
+    if kind == 'phone' and re.fullmatch(r'[+\d\s().-]+', value):
+        return any(re.fullmatch(r'[+\d\s().-]+', candidate) and re.sub(r'\D', '', value) == re.sub(r'\D', '', candidate)
+                   for candidate in candidates)
     if numeric:
         number = re.compile(r'\d+(?:\.\d+)?')
         return bool(number.fullmatch(value)) and any(
@@ -1061,7 +1127,11 @@ def unconfirmed_text_questions(scope: Locator, *, external: bool) -> list[str]:
             continue  # Disabled controls are not submitted by native forms.
         q = question_of(el)
         candidates = text_field_candidates(el, q, external=external)
-        if not text_value_confirmed(el.input_value(), candidates, numeric=el.get_attribute('type') == 'number'):
+        if external and el.get_attribute('role') == 'combobox':
+            confirmed = combobox_value_confirmed(el, q, candidates)
+        else:
+            confirmed = text_value_confirmed(el.input_value(), candidates, numeric=el.get_attribute('type') == 'number', question=q)
+        if not confirmed:
             issues.append(q or 'text field')
     return issues
 
@@ -1073,6 +1143,8 @@ FORM_VALUES_JS = """root => [...root.querySelectorAll('input,select,textarea')].
 def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     """Count actual form access/changed values without logging personal values."""
     METRICS.mark('forms_opened')
+    if external:
+        ensure_application_scope(modal)
     try:
         before = modal.evaluate(FORM_VALUES_JS)
     except Exception:
@@ -1091,23 +1163,39 @@ def fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
 def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     """Fill empty fields and verify answers; nonempty text is not confirmation."""
     unanswered: list[str] = []
+    if external:
+        ensure_application_scope(modal)
     # Text fields.
     fields = modal.locator(TEXT_FIELDS)
-    for el in fields.all():
+    if external:
+        controls = stable_application_controls(modal, TEXT_FIELDS)
+    else:
+        controls = [(el, None) for el in fields.all()]
+    for el, expected_question in controls:
         try:
+            if external:
+                ensure_application_scope(modal, el, question=expected_question)
             if not el.is_editable(timeout=2000):
                 continue
             q = question_of(el)
+            if external and q != expected_question:
+                raise ApplicationFormChanged('application_field_question_changed')
             cands = text_field_candidates(el, q, external=external)
             numeric = el.get_attribute('type') == 'number'
-            if el.input_value().strip():
-                if not text_value_confirmed(el.input_value(), cands, numeric=numeric):
-                    unanswered.append(q or 'text field')
-                continue
-            if external and el.get_attribute("role") == "combobox":
-                if not fill_combobox(page, el, q) or not text_value_confirmed(el.input_value(), cands, numeric=numeric):
+            if external and el.get_attribute('role') == 'combobox':
+                if not combobox_value_confirmed(el, q, cands) and not fill_combobox(page, el, q):
                     unanswered.append(q)
                 continue
+            if el.input_value().strip():
+                if text_value_confirmed(el.input_value(), cands, numeric=numeric, question=q):
+                    continue
+                replace_contact = (SETTINGS.get('replace_prefilled_contacts') is True
+                                   and application_answers.contact_kind(q) in ('first_name', 'last_name', 'full_name', 'email', 'phone')
+                                   and bool(cands))
+                if not replace_contact:
+                    unanswered.append(q or 'text field')
+                    continue
+                log('    .. replacing a prefilled contact with the reviewed profile value (enabled in GUI)')
             if not cands:
                 log(f"    ? unanswered question: {q[:90]}")
                 unanswered.append(q)
@@ -1122,11 +1210,15 @@ def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
                     unanswered.append(q)
                 else:
                     click_form_control(sugg.nth(idx))
-            if not text_value_confirmed(el.input_value(), cands, numeric=numeric):
+            if not text_value_confirmed(el.input_value(), cands, numeric=numeric, question=q):
                 unanswered.append(q or 'text field')
         except Exception as e:
+            if isinstance(e, ApplicationFormChanged):
+                raise
             if browser_closed(e):
                 raise BrowserClosed() from None
+            if external:
+                ensure_application_scope(modal, el, question=expected_question)
             try:
                 q = question_of(el)[:70]
             except Exception:
@@ -1135,12 +1227,17 @@ def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
             unanswered.append(q or "text field")
 
     # Native dropdowns.
+    if external:
+        ensure_application_scope(modal)
     for sel in modal.locator("select:visible").all():
         try:
             options = sel.locator("option").all_inner_texts()
             idx = choose_option(question_of(sel), options)
             if idx is not None:
                 sel.select_option(index=idx)
+                if (sel.locator('option').all_inner_texts() != options
+                        or sel.evaluate('e => e.selectedIndex') != idx):
+                    unanswered.append(question_of(sel) or 'select value changed')
             else:
                 unanswered.append(question_of(sel) or "select")
         except Exception as e:
@@ -1154,7 +1251,8 @@ def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
     for cb in modal.locator("input[type='checkbox']:visible").all():
         if cb.evaluate("e => !!e.closest('[data-checkgroup]')"):
             continue
-        if cb.get_attribute("id") == "follow-company-checkbox":
+        if is_optional_follow_checkbox(cb):
+            cb.set_checked(False)
             continue
         q = question_of(cb)
         idx = choose_option(q, ["Yes", "No"])
@@ -1168,14 +1266,20 @@ def _fill_step(page: Page, modal: Locator, external: bool = False) -> list[str]:
 
     resume = HOME / PROFILE["resume_file"]
     if external:
+        ensure_application_scope(modal)
         unanswered += fill_yesno(modal)
         # Upload the CV on external forms; skip cover-letter file inputs.
-        for fi in modal.locator("input[type='file']").all():
+        for fi, expected_question in stable_application_controls(modal, "input[type='file']"):
+            ensure_application_scope(modal, fi, question=expected_question)
+            if question_of(fi) != expected_question:
+                raise ApplicationFormChanged('application_upload_question_changed')
             key = (question_of(fi) + " " + (fi.get_attribute("name") or "") + " " + (fi.get_attribute("id") or "")).lower()
             if re.search(r"cover", key) or not resume.exists():
                 continue
             if re.search(r"resume|\bcv\b|lebenslauf|özgeçmiş", key) or modal.locator("input[type='file']").count() == 1:
                 try:
+                    if fi.evaluate('(e, name) => e.files.length === 1 && e.files[0].name === name', resume.name):
+                        continue
                     fi.set_input_files(str(resume))
                     pause(2, 3)
                 except Exception as e:
@@ -1280,7 +1384,7 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
         return preview_application(job_id)  # Defense in depth, including the preview budget.
     state = applied if applied is not None else load_applied()
     previous = state.get(job_id)
-    if previous and not can_retry(previous["status"]):
+    if previous and not can_retry(previous["status"]) and not deferred_review.authorized(job_id, previous):
         if previous["status"].startswith("applied"):
             return "applied_previously"
         if previous["status"] in UNCERTAIN_STATUSES:
@@ -1288,6 +1392,17 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
             return "submission_unconfirmed"
         return previous["status"]
     source = source_for_job(job_id)
+    manual = deferred_review.CURRENT.get()
+    if manual is not None:
+        if manual.job_id != job_id:
+            return 'manual_review'
+        scope = primary.locator('xpath=ancestor::*[self::form or self::dialog or @role="dialog"][1]')
+        if scope.count() != 1 or not manual.wait(sys.modules[__name__], page, scope,
+                                                ['Final review: confirm this application before sending']):
+            return 'manual_review'
+        ats = ats_provider(page.url)
+        if ats:
+            check_ats_form(page, page.locator('html[data-autoapply-document]'), scope, ats)
     denied = reserve_submission_attempt(source)
     if denied:
         return denied
@@ -1303,6 +1418,9 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
         if STOP.is_set():
             raise Stopped
         click_invoked = True
+        if manual is not None:
+            page.evaluate('''() => { window.__autoapplyManualClickUsed = false;
+                window.__autoapplyManualSubmitUsed = false; window.__autoapplyManualAllowSubmit = true; }''')
         primary.click()
         result = wait_result()
         if result in ("applied", "applied_external", "submission_rejected"):
@@ -1312,6 +1430,11 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
             raise BrowserClosed() from None
         log(f"  ! submission outcome unknown: {e.__class__.__name__}")
     finally:
+        if manual is not None:
+            try:
+                page.evaluate('window.__autoapplyManualAllowSubmit = false')
+            except Exception:
+                pass
         if not click_invoked:
             release_submission_attempt(source)
         # Also runs for STOP/BrowserClosed (BaseException), preserving uncertainty.
@@ -1450,6 +1573,32 @@ class UntrustedApplicationSite(Exception):
     """The application left its approved ATS document or has an unsafe target."""
 
 
+class ApplicationFormChanged(UntrustedApplicationSite):
+    """A field/form was replaced while filling; never reuse positional locators."""
+
+
+def ensure_application_scope(scope: Locator, field: Locator | None = None, *, question: str = '') -> None:
+    if scope.count() != 1 or (field is not None and field.count() != 1):
+        raise ApplicationFormChanged('application_form_changed_during_fill' + (': ' + question[:120] if question else ''))
+
+
+def stable_application_controls(scope: Locator, selector: str):
+    """Bind controls by unique native IDs, or by per-node tokens as a fallback."""
+    token = secrets.token_hex(12)
+    script = """(es, token) => es.map((e,i) => {
+        let selector;
+        if (e.id && document.querySelectorAll('#'+CSS.escape(e.id)).length === 1) {
+            selector = '#'+CSS.escape(e.id);
+        } else {
+            e.setAttribute('data-autoapply-field', token+'-'+i);
+            selector = '[data-autoapply-field="'+token+'-'+i+'"]';
+        }
+        return {selector, question: (""" + QUESTION_JS + """)(e)};
+    })"""
+    return [(scope.locator(entry['selector']), entry['question'])
+            for entry in scope.locator(selector).evaluate_all(script, token)]
+
+
 def safe_https_url(url: str) -> bool:
     """Reject URLs whose interpretation could differ between Python and Chrome."""
     if not isinstance(url, str) or not url or "\\" in url or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
@@ -1543,7 +1692,34 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
         issues += unconfirmed_text_questions(form, external=external)
         issues += unconfirmed_radio_questions(form)
         issues += unconfirmed_checkbox_questions(form)
-        issues += form.locator(
+        for sel in form.locator('select:visible').all():
+            if sel.is_disabled():
+                continue
+            q = question_of(sel)
+            idx = choose_option(q, sel.locator('option').all_inner_texts())
+            if idx is None or sel.evaluate('e => e.selectedIndex') != idx:
+                issues.append(q or 'unconfirmed select')
+        issues += native_form_issues(form)
+    except Exception as e:
+        if browser_closed(e):
+            raise BrowserClosed() from None
+        issues.append("form inspection failed")
+    if not issues:
+        return False
+    issues = list(dict.fromkeys(q or "unknown question" for q in issues))
+    log("  ? manual review: " + " | ".join(issues)[:300])
+    screenshot(page, f"{job_id.replace(':', '_')}_manual_review")
+    record_manual(job_id, title, company, url or page.url, "unanswered: " + " | ".join(issues)[:300])
+    manual = deferred_review.CURRENT.get()
+    if manual is not None and manual.job_id == job_id and 'form inspection failed' not in issues:
+        if manual.wait(sys.modules[__name__], page, form, issues):
+            return False
+    return True
+
+
+def native_form_issues(form: Locator) -> list[str]:
+    """Native/ARIA validity still applies to user-assisted, explicitly reviewed steps."""
+    issues = form.locator(
             "input, textarea, select, [aria-required='true']:visible"
         ).evaluate_all(r"""els => els.filter(e => {
             if (e.disabled || e.readOnly || e.type === 'hidden') return false;
@@ -1557,17 +1733,7 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
             if ('value' in e) return !e.value.trim();
             return !e.getAttribute('aria-valuetext');
         }).map(e => e.getAttribute('aria-label') || e.name || e.id || 'invalid required field')""")
-    except Exception as e:
-        if browser_closed(e):
-            raise BrowserClosed() from None
-        issues.append("form inspection failed")
-    if not issues:
-        return False
-    issues = list(dict.fromkeys(q or "unknown question" for q in issues))
-    log("  ? manual review: " + " | ".join(issues)[:300])
-    screenshot(page, f"{job_id.replace(':', '_')}_manual_review")
-    record_manual(job_id, title, company, url or page.url, "unanswered: " + " | ".join(issues)[:300])
-    return True
+    return issues
 
 
 def external_url(page: Page) -> str | None:
@@ -1701,11 +1867,23 @@ def apply_trusted_form(page: Page, job_id: str, title: str, company: str, form_u
     if not form.count():
         form = document.locator("body")
 
-    check_ats_form(page, document, form, ats)
-    unanswered = fill_step(page, form, external=True)
-    pause(1, 2)
-    check_ats_form(page, document, form, ats)
-    unanswered += fill_step(page, form, external=True)  # Second pass for conditional questions.
+    for attempt in range(2):
+        try:
+            check_ats_form(page, document, form, ats)
+            unanswered = fill_step(page, form, external=True)
+            pause(1, 2)
+            check_ats_form(page, document, form, ats)
+            unanswered += fill_step(page, form, external=True)  # Preserve first-pass uncertainty.
+            break
+        except ApplicationFormChanged:
+            # Only the original verified document may be rescanned. A same-host
+            # navigation/reload is still a new document and must remain blocked.
+            if document.count() != 1 or ats_provider(page.url) != ats:
+                raise UntrustedApplicationSite('document_changed_during_fill') from None
+            if attempt:
+                raise
+            log('  .. application form changed; reinspecting the same verified document once')
+            pause(0.5, 1)
     check_ats_form(page, document, form, ats)
     if require_manual_review(page, form, unanswered, job_id, title, company, form_url, external=True):
         return "manual_review"
@@ -2174,7 +2352,7 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         if previous and not can_retry(previous['status']):
             authorized_recheck = (previous['status'] in job_rechecks.RECHECKABLE
                                  and previous.get('recheck', {}).get('run_id') == RECHECK_STATE['id'])
-            if not authorized_recheck:
+            if not authorized_recheck and not deferred_review.authorized(job_id, previous):
                 METRICS.mark('history_skipped', job_id)
                 return False
         if submission_quota_status('linkedin'):
@@ -2324,6 +2502,7 @@ def run_bot(*, reset_stop: bool = True) -> int:
                 pass
     LAST_RUN_FILE.write_text(f"{dt.datetime.now().isoformat(timespec='minutes')} {'dry-run' if DRY_RUN else 'applied'}={count} attempts={ATTEMPTS['total']}\n", encoding="utf-8")
     log('Finished. ' + METRICS.summary(submit_attempts=0 if DRY_RUN else ATTEMPTS['total']))
+    log(f'Deferred applications awaiting manual input: {len(deferred_review.queue(applied, MANUAL_FILE))}. Open Deferred applications in the GUI after the run.')
     return 0
 
 

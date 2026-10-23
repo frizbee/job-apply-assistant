@@ -10,7 +10,11 @@ function element(attrs) {
   const get = name => attrs.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
   const classes = new Set();
   return { id: get("id"), dataset: { l: get("data-l"), t: get("data-t") },
-    value: "", textContent: "", innerHTML: "", checked: false, disabled: false, style: {},
+    value: "", textContent: "", innerHTML: "", checked: false, disabled: false, style: {}, children: [],
+    replaceChildren(...children) { this.children = children; },
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this[name] = value; },
+    querySelector(selector) { return this.children.find(e => '.' + e.className === selector); },
     classList: { toggle(name, on) { on ? classes.add(name) : classes.delete(name); },
       add(name) { classes.add(name); }, remove(name) { classes.delete(name); }, contains(name) { return classes.has(name); } },
     scrollIntoView() {}, focus() {}, click() { return this.onclick?.(); } };
@@ -25,12 +29,14 @@ const buttons = [...markup.match(/<div class="lang">([\s\S]*?)<\/div>/)[1].match
 const body = { innerHTML: "" };
 const document = {
   body,
+  createElement() { return element(''); },
   documentElement: { lang: "en" },
   getElementById(id) { return body.innerHTML ? null : elements.get(id); },
   querySelectorAll(selector) {
     if (selector === "[data-t]") return translated;
     if (selector === ".lang button") return buttons;
     if (selector === ".lang button[data-l]") return buttons.filter(b => b.dataset.l !== undefined);
+    if (selector === ".question-preset") return elements.get('question_presets').children;
     return [];
   },
 };

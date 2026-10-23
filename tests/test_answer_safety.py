@@ -173,9 +173,10 @@ class ControlTests(SafetyTest):
         field.is_editable.return_value = True
         field.get_attribute.return_value = ""
         field.evaluate.return_value = "Explain your difficult project"
-        scope.locator.side_effect = lambda selector: fields if "textarea:visible" in selector else empty
+        scope.locator.side_effect = lambda selector: fields if "textarea:visible" in selector else field if selector.startswith('[data-autoapply-field=') else empty
         fields, empty = node(), node()
         fields.all.return_value = [field]
+        fields.evaluate_all.return_value = [{'selector': '[data-autoapply-field="fixture"]', 'question': 'Explain your difficult project'}]
         scope.evaluate.return_value = []
         apply.PROFILE["cover_letter"] = "Generic cover letter"
         self.assertIn("Explain your difficult project", apply.fill_step(page, scope, external=True))
