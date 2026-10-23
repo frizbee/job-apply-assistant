@@ -87,7 +87,7 @@ def main():
                     page.get_by_role('button', name=apply.EASY_APPLY_RE).or_(page.locator(f'[componentkey="jdp-continue-button-{job_id}"]')).first.wait_for(state='visible', timeout=15000)
                     title, company, desc = apply.job_info(page)
                     reason = apply.job_ok(title, company, desc)
-                    job = {'id': job_id, 'title': title, 'company': company, 'url': url, 'metadata': apply.read_job_metadata(page, 'linkedin', url)}
+                    job = {'id': job_id, 'title': title, 'company': company, 'desc': desc, 'url': url, 'metadata': apply.read_job_metadata(page, 'linkedin', url)}
                     if reason or not apply.check_job_eligibility(job, history):
                         active['result'] = 'eligibility_blocked:' + str(reason or 'metadata')
                     else:

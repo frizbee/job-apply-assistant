@@ -67,6 +67,7 @@ class Session:
     def __init__(self, job_id, test_mode, cv_hash=None):
         self.job_id, self.test_mode = job_id, test_mode
         self.cv_hash = cv_hash
+        self.description_instructions = []
         self.lock = threading.Lock()
         self.state = {'job_id': job_id, 'test_mode': test_mode, 'phase': 'opening', 'issues': []}
         self.command = None
@@ -179,6 +180,10 @@ def run(core, row, session):
     if history.get(session.job_id, {}).get('status') not in REVIEWABLE:
         session.finish('history_protected_or_no_longer_deferred')
         return
+    session.description_instructions = [
+        'Description instruction — review the required wording and destination: ' + excerpt
+        for excerpt in history[session.job_id].get('description_instructions', [])
+    ]
     token = CURRENT.set(session)
     old_limits = dict(core.CFG['limits'])
     old_replace = core.SETTINGS.get('replace_prefilled_contacts', False)
@@ -218,6 +223,7 @@ def run(core, row, session):
                         job = {'id': session.job_id, 'title': row['title'], 'company': row['company'], 'url': row['job_url'],
                                'metadata': core.read_job_metadata(page, source, row['job_url'])}
                         description = job['metadata'].get('description') or ''
+                        job['desc'] = description
                         reason = (core.job_ok(row['title'], row['company'], description)
                                   or ('applied_elsewhere' if core.applied_elsewhere(history, row['title'], row['company']) else None))
                         if reason:

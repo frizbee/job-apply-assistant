@@ -45,6 +45,7 @@ import job_rechecks
 import linkedin_search
 import application_answers
 import deferred_review
+import description_instructions
 import linkedin_forms
 import application_identity
 from platforms.registry import ats_adapter
@@ -934,7 +935,9 @@ def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_
     Unknown questions are conservative: even optional/prefilled text needs confirmation.
     Native validation also catches unsupported required fields and failed file uploads.
     """
-    issues = list(unanswered)
+    manual = deferred_review.CURRENT.get()
+    instructions = getattr(manual, 'description_instructions', []) if manual is not None and manual.job_id == job_id else []
+    issues = [*instructions, *unanswered]
     try:
         issues += unconfirmed_text_questions(form, external=external)
         issues += unconfirmed_radio_questions(form)
@@ -1093,7 +1096,7 @@ def check_job_eligibility(job: dict, applied: dict) -> bool:
     # A board's location label is not an employment-eligibility rule. Search
     # regions come from user settings; never infer allowed regions from the CV.
     if reason is None:
-        return True
+        return check_description_instructions(job, applied)
     unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown", 'location_unknown')
     status = "metadata_manual" if unknown else reason
     log(f"- skip [{reason}] {job['title']} @ {job['company']}")
@@ -1107,6 +1110,29 @@ def check_job_eligibility(job: dict, applied: dict) -> bool:
         applied[job['id']]['metadata_diagnostic'] = (job.get('metadata') or {}).get('diagnostic')
         applied[job['id']]['decisions'][-1].update(reason=reason, metadata_diagnostic=applied[job['id']]['metadata_diagnostic'])
         write_applied(applied)
+    return False
+
+
+def check_description_instructions(job: dict, applied: dict) -> bool:
+    """Defer writing/attention checks before opening a form; never invent answers."""
+    excerpts = description_instructions.find(job.get('desc') or (job.get('metadata') or {}).get('description') or '')
+    if not excerpts:
+        return True
+    issues = ['Description instruction — review the required wording and destination: ' + excerpt for excerpt in excerpts]
+    manual = deferred_review.CURRENT.get()
+    if manual is not None and manual.job_id == job['id']:
+        manual.description_instructions = issues
+        return True  # Each form step must still receive explicit human approval.
+    previous = applied.get(job['id'], {})
+    if previous.get('status', '').startswith('applied') or previous.get('status') in UNCERTAIN_STATUSES | {'submission_rejected'}:
+        return False
+    reason = '\n'.join(issues)
+    log(f"  ? description instructions: manual review required for {job['title']} @ {job['company']}")
+    record_manual(job['id'], job['title'], job['company'], job['url'], reason)
+    record(applied, job['id'], job['title'], job['company'], 'manual_review', job['url'])
+    applied[job['id']].update(reason=reason, description_instructions=excerpts)
+    write_applied(applied)
+    METRICS.mark('manual', job['id'])
     return False
 
 
