@@ -111,7 +111,7 @@ def state() -> dict:
         except llm_credentials.CredentialError:
             credentials[provider] = {'provider': provider, 'has_key': False, 'source': 'error'}
     return {
-        "settings": {**{k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode", "target_technologies", "excluded_technologies", "excluded_title_words", "replace_prefilled_contacts")},
+        "settings": {**{k: s.get(k) for k in ("salary", "currency", "monthly_salary_by_currency", "home_currency", "english", "notice", "locations", "sources", "test_mode", "target_technologies", "excluded_technologies", "excluded_title_words", "replace_prefilled_contacts", "linkedin_experience_levels")},
                      'question_presets': s.get('question_presets', []) if prof is not None and s.get('question_presets_cv_hash') == digest else []},
         'question_templates': apply.application_answers.TEMPLATES,
         "cv_name": Path(s["resume"]).name if s.get("resume") and Path(s["resume"]).exists() else "",
@@ -373,6 +373,9 @@ def _prepare_start(body: dict) -> dict:
         return {"error": "invalid_settings", "detail": "settings.sources: expected known source names"}
     if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         return {"error": "invalid_settings", "detail": "settings.locations: expected nonblank strings"}
+    levels = body.get('linkedin_experience_levels', s.get('linkedin_experience_levels'))
+    if levels is not None and (not isinstance(levels, list) or any(not isinstance(level, str) or level not in apply.linkedin_search.EXPERIENCE_LEVELS for level in levels) or len(set(levels)) != len(levels)):
+        return {'error': 'invalid_settings', 'detail': 'linkedin_experience_levels: expected unique native level names'}
     technology_settings = {field: body.get(field, s.get(field, [])) for field in apply.job_relevance.USER_FIELDS}
     replace_contacts = body.get('replace_prefilled_contacts', False)
     if type(replace_contacts) is not bool:
@@ -410,6 +413,8 @@ def _prepare_start(body: dict) -> dict:
                sources=body["sources"], test_mode=body["test_mode"])
     s.update({field: [term.strip() for term in terms] for field, terms in technology_settings.items()})
     s.update(question_presets=[dict(entry) for entry in presets], question_presets_cv_hash=digest)
+    if levels is not None:
+        s['linkedin_experience_levels'] = list(levels)
     s['replace_prefilled_contacts'] = replace_contacts
     for name in SOURCE_NAMES:
         apply.CFG["sources"][name] = name in body["sources"]
@@ -575,6 +580,10 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
     <p class="hint" id="locations_hint" data-t="locations_hint"></p>
     <div id="locations" class="checks region-options"></div>
   </fieldset>
+  <fieldset><legend data-t="linkedin_levels"></legend>
+    <p class="hint" data-t="linkedin_levels_hint"></p>
+    <div id="linkedin_levels" class="checks"></div>
+  </fieldset>
   <div class="grid">
     <div><label for="total_years" data-t="years"></label><input type="text" id="total_years"></div>
     <div><label for="notice" data-t="notice"></label><input type="text" id="notice"></div>
@@ -632,6 +641,7 @@ const T = {
   first_name:"First name", last_name:"Last name", email:"E-mail", phone:"Phone (with country code)", phone_country_code:"Phone country calling code", phone_national:"Phone number (without country calling code)", phone_saved:"Previously saved full phone number", phone_split_hint:"Confirm the calling code and remaining number separately. An unsplit old number is shown for reference only; no code is guessed from your location.", city:"City, Country", country:"Country", github:"GitHub / portfolio",
   question_presets_title:"Additional questions and confirmed answers", question_presets_hint:"Enter only your own confirmed answers. Blank answers remain manual. Use Edit question to match the employer's exact wording; case, whitespace and a trailing required-field asterisk are ignored. Work authorization and sponsorship answers apply only to the stated country and wording. For salary, specify amount, currency and period; a question without currency/period cannot safely use an automatic conversion. Answers are saved with this CV; no automatic Yes answers.",
   edit_question:"Edit question", question_wording:"Exact employer question", confirmed_answer:"Your confirmed answer (optional)",
+  linkedin_levels:"LinkedIn experience levels", linkedin_levels_hint:"Choose the native LinkedIn levels. No boxes selected means no experience filter. Senior and Manager are separate categories; your job-title filters still apply.",
   locations_hint:"Select one or more regions. EMEA includes Europe, the Middle East and Africa. EU, EEA and EMEA overlap; applications remain protected against duplicates. A region match does not establish permission to work there.",
   replace_prefilled_contacts:"Replace site-prefilled name, email and phone with my reviewed profile values when they differ. Check your profile carefully before enabling.",
   err_review_unavailable:"The deferred queue or selected application is unavailable.", err_invalid_review_job:"Choose a deferred application.", err_review_not_waiting:"This review step has changed. Wait for the current step.", err_invalid_review_action:"Unknown review action.",
@@ -665,6 +675,7 @@ const T = {
   first_name:"Ad", last_name:"Soyad", email:"E-posta", phone:"Telefon (ülke koduyla)", phone_country_code:"Telefon ülke arama kodu", phone_national:"Telefon numarası (ülke arama kodu olmadan)", phone_saved:"Önceden kaydedilmiş tam telefon numarası", phone_split_hint:"Arama kodunu ve kalan numarayı ayrı ayrı doğrulayın. Eski numara yalnızca referans içindir; konumunuzdan kod tahmin edilmez.", city:"Şehir, Ülke", country:"Ülke", github:"GitHub / portfolyo",
   question_presets_title:"Ek sorular ve onaylı yanıtlar", question_presets_hint:"Yalnızca kendi onayladığınız yanıtları girin. Boş yanıtlar manuel kalır. Soruyu düzenle ile işverenin tam metnini kullanın; harf boyutu, boşluk ve sondaki zorunlu alan yıldızı yok sayılır. Çalışma izni ve sponsorluk yanıtları yalnızca belirtilen ülke ve soru için geçerlidir. Maaş için tutar, para birimi ve dönem belirtin; para birimi/dönem içermeyen soruda otomatik dönüşüm güvenli değildir. Yanıtlar bu CV ile kaydedilir; otomatik Yes yanıtı yoktur.",
   edit_question:"Soruyu düzenle", question_wording:"İşverenin tam sorusu", confirmed_answer:"Onayladığınız yanıt (isteğe bağlı)",
+  linkedin_levels:"LinkedIn deneyim seviyeleri", linkedin_levels_hint:"LinkedIn'in kendi seviyelerini seçin. Hiçbiri seçili değilse deneyim filtresi uygulanmaz. Senior ve Manager ayrı kategorilerdir; pozisyon başlığı filtreleri geçerlidir.",
   locations_hint:"Bir veya daha fazla bölge seçin. EMEA; Avrupa, Orta Doğu ve Afrika'yı kapsar. AB, AEA ve EMEA örtüşür; yinelenen başvurulara karşı koruma sürer. Bölge eşleşmesi çalışma izni anlamına gelmez.",
   replace_prefilled_contacts:"Sitenin önceden doldurduğu ad, e-posta ve telefonu farklıysa onayladığım profil değerleriyle değiştir. Etkinleştirmeden önce profilinizi dikkatlice kontrol edin.",
   err_review_unavailable:"Ertelenen kuyruk veya seçili başvuru kullanılamıyor.", err_invalid_review_job:"Ertelenen bir başvuru seçin.", err_review_not_waiting:"İnceleme adımı değişti. Geçerli adımı bekleyin.", err_invalid_review_action:"Bilinmeyen inceleme işlemi.",
@@ -759,6 +770,12 @@ async function load() {
   $("currency").value = cur; $("salary").value = ms[cur] ?? (st.salary ? Math.round(st.salary / 12) : "");
   $("salary_eur").value = ms.EUR ?? ""; $("salary_usd").value = ms.USD ?? ""; $("notice").value = st.notice || "";
   fillLocations(st.locations || S.default_locations || []);
+  $("linkedin_levels").replaceChildren();
+  for (const level of ["Entry-level", "Senior", "Manager", "Director", "Executive"]) {
+    const label = document.createElement("label"), box = document.createElement("input"), text = document.createElement("span");
+    box.type = "checkbox"; box.value = level; box.checked = (st.linkedin_experience_levels || []).includes(level);
+    text.textContent = level; label.append(box, text); $("linkedin_levels").append(label);
+  }
   $("target_technologies").value = (st.target_technologies || []).join("\n");
   $("excluded_title_words").value = (st.excluded_title_words || []).join("\n");
   $("excluded_technologies").value = (st.excluded_technologies || []).join("\n");
@@ -815,6 +832,7 @@ function startBody() {
   for (const k of ["first_name","last_name","email","phone_intl","city","country","linkedin","github","total_years","cover_letter"]) profile[k] = $(k).value.trim();
   profile.job_titles = lines("job_titles");
   const body = { profile, cv_hash: S.cv_hash, locations: [...document.querySelectorAll("#locations input:checked")].map(e => e.value), salary: $("salary").value, currency: $("currency").value,
+    linkedin_experience_levels: [...document.querySelectorAll("#linkedin_levels input:checked")].map(e => e.value),
     question_presets: [...document.querySelectorAll(".question-preset")].map(row => ({ question: row.querySelector(".preset-question").value.trim(), answer: row.querySelector(".preset-answer").value.trim() })).filter(entry => entry.question || entry.answer),
     phone_country_code: $("phone_country_code").value.trim(), phone_national: $("phone_national").value.trim(),
     replace_prefilled_contacts: $("replace_prefilled_contacts").checked,

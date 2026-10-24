@@ -80,6 +80,10 @@ class SearchBrowserTests(SafetyTest):
         self.enterContext(patch.object(apply, 'DEADLINE', float('inf')))
         self.repeated = False
         self.raw_html = None
+        self.ignore_experience = False
+        self.empty_first_location = False
+        self.always_empty_location = False
+        apply.CFG['search']['experience_levels'] = []
         self.requests = []
         self.ctx.route('**/*', self.route)
         self.engine = search.LinkedInSearch(self.worker, apply)
@@ -95,20 +99,30 @@ class SearchBrowserTests(SafetyTest):
         keyword = params.get('keywords', [''])[0]
         applied = params.get('geoId') == ['111']
         region = 'Latin America' if applied else 'Greater Buenos Aires'
+        selected = params.get('nativeExperience', [''])[0].split(',') if not self.ignore_experience else []
+        options = ''.join(f'<div><input type="checkbox" id="exp-{i}" aria-label="{name}" {"checked" if name in selected else ""}><label for="exp-{i}">{name}</label></div>'
+                          for i, name in enumerate(search.EXPERIENCE_LEVELS))
         body = f'''<meta charset="utf-8"><input componentkey="semanticSearchBox" value="{html.escape(keyword, quote=True)}">
         <div componentkey="searchResultsHeaderComponent"><p>2 results</p><div role="button" tabindex="0" onclick="document.getElementById('popup').style.display='block'">
         <span aria-label="Location {region}">{region}</span></div></div>
         <div id="popup" style="display:none"><div role="textbox" contenteditable="true" aria-label="Location" oninput="suggest(this.innerText)"></div><div id="semanticSearchBoxLocationList"></div></div>
         <div componentkey="JobsSearchFilters"><div><input type="checkbox" id="remote" aria-label="Filter by Remote" checked><label for="remote">Remote</label></div>
-        <div><input type="checkbox" id="easy" aria-label="Filter by Easy Apply"><label for="easy">Easy Apply</label></div></div>
+        <div><input type="checkbox" id="easy" aria-label="Filter by Easy Apply"><label for="easy">Easy Apply</label></div>
+        <div role="button" tabindex="0" onclick="document.getElementById('exp-menu').style.display='block'"><span aria-label="Filter by Experience level">Experience level</span></div></div>
+        <div id="exp-menu" style="display:none">{options}<div><a href="#" onclick="applyExperience(event)">Show results</a></div></div>
         <aside><a href="/jobs/view/999/">Selected detail / recommendation</a><div componentkey="job-card-component-ref-999" role="button">Not a result</div></aside>
         <div componentkey="SearchResultsMainContent"><section id="cards"><div componentkey="job-card-component-ref-1" role="button"><div componentkey="job-card-component-ref-1">First</div></div><div componentkey="job-card-component-ref-2">Second</div></section>
         <button type="button" data-testid="pagination-controls-next-button-visible" onclick="nextPage()">Next</button>
         <button type="button" aria-label="Page 1" aria-current="true">1</button><button type="button" aria-label="Page 2" aria-current="false">2</button></div>
         <script>
+        let locationInputs=0;
         function suggest(value){{let out=document.getElementById('semanticSearchBoxLocationList');out.innerHTML='';
+            if(value==='Latin America')locationInputs++;
+            if({str(self.always_empty_location).lower()} || ({str(self.empty_first_location).lower()} && locationInputs===1))return;
             const label=value==='Latin America'?'Latin America':value==='Europe'?'European Union':null;
             if(label){{let a=document.createElement('a');a.textContent=label;a.href='https://www.linkedin.com/jobs/search-results/?geoId=111';out.appendChild(a)}}}}
+        document.addEventListener('keydown',e=>{{if(e.key==='Escape'){{document.getElementById('exp-menu').style.display='none';document.getElementById('popup').style.display='none'}}}});
+        function applyExperience(event){{event.preventDefault();let u=new URL(location.href);u.searchParams.set('nativeExperience',[...document.querySelectorAll('#exp-menu input:checked')].map(e=>e.getAttribute('aria-label')).join(','));location.href=u.href;}}
         function nextPage(){{
             if(!{str(self.repeated).lower()})document.getElementById('cards').innerHTML='<div componentkey="job-card-component-ref-3">Third</div><div componentkey="job-card-component-ref-4">Fourth</div>';
             document.querySelector('[aria-label="Page 1"]').setAttribute('aria-current','false');document.querySelector('[aria-label="Page 2"]').setAttribute('aria-current','true');}}
@@ -169,3 +183,60 @@ class SearchBrowserTests(SafetyTest):
             self.engine.search_page('Senior Ruby Developer', 'Latin America')
         self.assertTrue(self.engine.page.locator('#easy').is_checked())
         self.assertEqual((apply.CFG, apply.SETTINGS), before)
+
+    def test_empty_autocomplete_is_retyped_and_exact_region_recovers(self):
+        self.empty_first_location = True
+        self.assertEqual(self.engine.search_page('Ruby', 'Latin America')['ids'], ['1', '2'])
+        self.assertEqual(self.engine.regions['Latin America'], '111')
+
+    def test_empty_autocomplete_is_not_cached_as_unsupported(self):
+        self.always_empty_location = True
+        with self.assertRaises(search.SearchUnavailable) as error:
+            self.engine.search_page('Ruby', 'Latin America')
+        self.assertNotIsInstance(error.exception, search.UnsupportedLocation)
+        self.assertNotIn('Latin America', self.engine.regions)
+
+    def test_native_experience_levels_are_applied_and_verified_across_pagination(self):
+        apply.SETTINGS['linkedin_experience_levels'] = ['Senior', 'Manager']
+        self.engine.search_page('Ruby', 'Latin America')
+        self.assertEqual(parse_qs(urlparse(self.engine.page.url).query)['nativeExperience'], ['Senior,Manager'])
+        self.engine.search_page('Ruby', 'Latin America', 1)
+        self.assertFalse(self.engine.page.locator('#exp-menu').is_visible())
+
+    def test_ignored_experience_filter_blocks_collection(self):
+        apply.SETTINGS['linkedin_experience_levels'] = ['Senior', 'Manager']
+        self.ignore_experience = True
+        with self.assertRaisesRegex(search.SearchUnavailable, 'changed or ignored'):
+            self.engine.search_page('Ruby', 'Latin America')
+
+    def test_experience_reset_on_next_page_blocks_collection(self):
+        apply.SETTINGS['linkedin_experience_levels'] = ['Senior']
+        self.engine.search_page('Ruby', 'Latin America')
+        self.engine.page.locator('input[aria-label="Senior"]').evaluate('e=>e.checked=false')
+        with self.assertRaisesRegex(search.SearchUnavailable, 'changed or ignored'):
+            self.engine.search_page('Ruby', 'Latin America', 1)
+
+    def test_unsupported_legacy_level_is_not_silently_replaced(self):
+        apply.CFG['search']['experience_levels'] = [3, 4]
+        with self.assertRaisesRegex(search.SearchUnavailable, 'Associate'):
+            self.engine.search_page('Ruby', 'Latin America')
+
+    def test_empty_explicit_experience_selection_clears_existing_native_filter(self):
+        apply.SETTINGS['linkedin_experience_levels'] = ['Senior']
+        self.engine.search_page('Ruby', 'Latin America')
+        apply.SETTINGS['linkedin_experience_levels'] = []
+        self.engine.experience(configure=True)
+        self.assertEqual(self.engine.verified_experience, [])
+        self.assertFalse(self.engine.page.locator('input[aria-label="Senior"]').is_checked())
+
+    def test_remote_reset_on_next_page_blocks_collection(self):
+        self.engine.search_page('Ruby', 'Latin America')
+        self.engine.page.locator('#remote').evaluate('e=>e.checked=false')
+        with self.assertRaisesRegex(search.SearchUnavailable, 'Remote filter was changed'):
+            self.engine.search_page('Ruby', 'Latin America', 1)
+
+    def test_filter_hydration_gap_is_waited_for(self):
+        self.engine.search_page('Ruby', 'Latin America')
+        self.engine.page.locator('#remote').evaluate('e=>{e.setAttribute("aria-label","loading");setTimeout(()=>e.setAttribute("aria-label","Filter by Remote"),100)}')
+        self.engine.checkbox('Remote', True, configure=False)
+        self.assertTrue(self.engine.verified_filters['Remote'])

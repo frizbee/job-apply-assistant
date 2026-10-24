@@ -194,6 +194,14 @@ class BrowserGUIControlTests(SafetyTest):
         self.assertEqual(self.page.locator('#locations input:checked').count(), 0)
         self.assertEqual(self.page.evaluate('startBody().locations'), [])
 
+    def test_native_experience_levels_roundtrip_without_guessing(self):
+        self.open_profile_form({'linkedin_experience_levels': ['Senior', 'Manager']})
+        self.assertEqual(self.page.evaluate('startBody().linkedin_experience_levels'), ['Senior', 'Manager'])
+        self.page.locator('#linkedin_levels').get_by_label('Manager', exact=True).uncheck()
+        self.assertEqual(self.page.evaluate('startBody().linkedin_experience_levels'), ['Senior'])
+        self.page.locator('#linkedin_levels').get_by_label('Senior', exact=True).uncheck()
+        self.assertEqual(self.page.evaluate('startBody().linkedin_experience_levels'), [])
+
     def test_questions_use_full_labels_and_editable_wording(self):
         import application_answers
         self.open_profile_form()

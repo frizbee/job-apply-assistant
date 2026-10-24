@@ -683,7 +683,14 @@ class FormEngine(PlatformAdapter):
         return unanswered
 
     def has_errors(self, modal: Locator) -> bool:
-        return modal.locator("[aria-invalid='true']:visible, [role='alert']:visible, .artdeco-inline-feedback--error:visible, [data-test-form-element-error-messages]:visible").count() > 0
+        if modal.locator("[aria-invalid='true']:visible, .artdeco-inline-feedback--error:visible, [data-test-form-element-error-messages]:visible").count():
+            return True
+        # LinkedIn announces a successful upload as role=alert. It is not a
+        # validation error and must not send the new preview down the stalled-
+        # Next branch before the final step clears Follow. Unknown alerts still
+        # fail closed; explicit error markers above always take precedence.
+        return any(' '.join(text.split()).casefold() != 'resume uploaded successfully'
+                   for text in modal.locator("[role='alert']:visible").all_inner_texts())
 
     def native_form_issues(self, form: Locator) -> list[str]:
         """Native/ARIA validity still applies to user-assisted, explicitly reviewed steps."""

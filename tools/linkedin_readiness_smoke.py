@@ -77,14 +77,12 @@ def main():
                     try:
                         result = search.search_page(keyword, region, index)
                         params = parse_qs(urlparse(search.page.url).query)
-                        filters = search.page.locator('[componentkey="JobsSearchFilters"]')
-                        remote = filters.locator('input[aria-label="Filter by Remote"]')
-                        experience = filters.locator('[aria-label="Filter by Experience level"] input')
                         row = {'region': region, 'page': index + 1, 'verified_region': search.location_label(),
                                'geoId': params.get('geoId'), 'ids': result['ids'], 'count': len(result['ids']),
-                               'remote': remote.first.is_checked() if remote.count() else None,
-                               'experience_active': experience.first.is_checked() if experience.count() else None,
+                               'remote': search.verified_filters.get('Remote'),
+                               'experience_active': bool(search.verified_experience),
                                'experience_url': params.get('f_E'), 'posted_window': params.get('f_TPR')}
+                        row['verified_experience'] = list(search.verified_experience)
                         candidates[region].extend(result['ids'])
                         report['searches'].append(row)
                         print('SEARCH', json.dumps({k: v for k, v in row.items() if k != 'ids'}), flush=True)

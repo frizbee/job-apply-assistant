@@ -82,6 +82,30 @@ class BrowserLinkedinReadinessTests(SafetyTest):
         self.assertEqual(apply.fill_step(self.page, form), [])
         self.assertFalse(form.locator('input').is_checked())
 
+    def test_successful_upload_alert_does_not_skip_final_follow_cleanup(self):
+        self.load('''<button type="button" onclick="document.querySelector('dialog').showModal()">Easy Apply</button>
+            <dialog><form><p>Contact step</p><div role="alert">Resume uploaded successfully</div>
+            <footer><button type="button" onclick="preview()">Review</button></footer></form></dialog>
+            <script>function preview(){document.querySelector('form').innerHTML =
+            '<p>Review your application</p><div role="alert">Resume uploaded successfully</div>' +
+            '<input type="checkbox" id="follow-company-checkbox" checked style="display:none">' +
+            '<label for="follow-company-checkbox">Follow Example to stay up to date with their page</label>' +
+            '<footer><button type="button" onclick="window.sent=true">Submit application</button></footer>';}</script>''')
+        with patch.object(apply, 'DRY_RUN', True):
+            self.assertEqual(apply.apply_to_job(self.page, '123', 'Engineer', 'Example'), 'dry_run')
+        self.assertFalse(self.page.locator('#follow-company-checkbox').is_checked())
+        self.assertIsNone(self.page.evaluate('window.sent'))
+        self.manual.assert_not_called()
+
+    def test_unknown_alerts_and_error_markers_still_block(self):
+        for content in ['<div role="alert">Resume upload failed</div>',
+                        '<div role="alert">Unknown site message</div>',
+                        '<div role="alert">Resume uploaded successfully</div><input aria-invalid="true">',
+                        '<div role="alert" class="artdeco-inline-feedback--error">Resume uploaded successfully</div>']:
+            with self.subTest(content=content):
+                form = self.load('<form>' + content + '</form>')
+                self.assertTrue(apply.has_errors(form))
+
     def test_required_follow_is_not_treated_as_optional_preference(self):
         form = self.load('''<form><input type="checkbox" id="follow-company-checkbox" checked required>
             <label for="follow-company-checkbox">Follow Example to stay up to date with their page</label></form>''')
