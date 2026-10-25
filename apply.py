@@ -302,7 +302,7 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
 
 
 BLOCKED_RE = re.compile(r"just a moment|attention required|additional verification|security check|"
-                        r"humans only|verify you are human|are you a robot|captcha", re.I)
+                        r"humans only|verif(?:y|ying) you are human|(?:website|site) verifies (?:that )?you are not a bot|are you a robot|captcha", re.I)
 
 
 def blocked(page: Page) -> bool:

@@ -240,8 +240,12 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 preliminary = job_metadata.eligibility_reason(metadata, core.CFG["search"]["posted_within_hours"],
                                                                core.CFG["search"].get("remote_only", False))
                 if not loader and preliminary in ("posting_date_unknown", "posting_date_future", "workplace_unknown"):
-                    if page.url == job["url"] or goto(page, job["url"], name):
-                        metadata = job_metadata.merge_metadata(metadata, core.read_job_metadata(page, name, job["url"]))
+                    ready = not core.blocked(page) if page.url == job["url"] else goto(page, job["url"], name)
+                    if not ready:
+                        core.check_job_eligibility(job, applied)
+                        core.log(f'  Access to {name} was blocked during metadata inspection; moving to the next source without opening more jobs.')
+                        break
+                    metadata = job_metadata.merge_metadata(metadata, core.read_job_metadata(page, name, job["url"]))
                 job["metadata"] = metadata
                 if not core.check_job_eligibility(job, applied):
                     continue
