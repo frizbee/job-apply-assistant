@@ -10,7 +10,7 @@ from job_relevance import VERSION as RELEVANCE_REVISION
 
 RECHECKABLE = frozenset({'metadata_manual', 'title_not_relevant', 'relevance_manual',
                        'required_stack_incompatible', 'specialized_role', 'excluded_technology', 'title_keyword_excluded'})
-PARSER_REVISION = 'linkedin-details-v2'
+PARSER_REVISION = 'linkedin-details-v2+remoteok-detail-v2'
 
 
 def revision(config: dict, settings: dict) -> str:

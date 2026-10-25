@@ -71,6 +71,7 @@ class GateTests(SafetyTest):
         self.manual = self.enterContext(patch.object(apply, "record_manual"))
         self.enterContext(patch.object(apply, "job_ok", return_value=None))
         self.enterContext(patch.object(apply, "DEADLINE", float("inf")))
+        self.enterContext(patch.object(sources, 'DETAIL_LOADERS', {}))  # Exercise the common gate independently of real adapters.
         self.job = {"id": "test", "title": "Engineer", "company": "Example", "url": "https://example.com/job", "desc": "", "location": ""}
 
     def job_with(self, days=1, workplace="remote", known_date=True):
@@ -219,6 +220,73 @@ class BrowserMetadataTests(SafetyTest):
         result = metadata.page_metadata(self.page, "linkedin", url)
         self.assertIsNone(result["workplace"])
         self.assertIsNone(result["posted_at"])
+
+
+    def remoteok_fixture(self, *, root_id='123', data_id='123', href=None, workplace='TELECOMMUTE',
+                         label='', hidden=False, posting_title='Senior Backend Engineer', extra_postings=None):
+        url = 'https://remoteok.com/remote-jobs/remote-senior-backend-engineer-example-123'
+        posting = {'@type': 'JobPosting', 'title': posting_title, 'datePosted': NOW.isoformat(),
+                   'jobLocationType': workplace, 'hiringOrganization': {'name': 'Example'}}
+        self.html = '<h1>Remote Senior Backend Engineer</h1><table><tbody>' + \
+            f'<tr class="job" id="job-{root_id}" data-id="{data_id}" data-href="{href or url}"' + \
+            (' style="display:none"' if hidden else '') + '><td>' + \
+            '<h2 itemprop="title">Senior Backend Engineer</h2>' + \
+            '<script type="application/ld+json">' + json.dumps(posting) + '</script>' + \
+            (('<span class="location">' + label + '</span>') if label else '') + \
+            ''.join('<script type="application/ld+json">' + json.dumps(item) + '</script>' for item in (extra_postings or [])) + \
+            '</td></tr></tbody></table>'
+        self.page.goto(url)
+        return url
+
+    def test_remoteok_uses_exact_job_row_title_not_remote_prefixed_global_h1(self):
+        url = self.remoteok_fixture()
+        result = metadata.page_metadata(self.page, 'remoteok', url)
+        self.assertEqual(result['workplace'], 'remote')
+        self.assertEqual(result['title'], 'Senior Backend Engineer')
+        self.assertEqual(result['posted_at'], NOW)
+        self.assertEqual(result['diagnostic']['scoped_job_id'], '123')
+        self.assertIsNone(metadata.eligibility_reason(result, 168, True, NOW))
+
+    def test_remoteok_does_not_use_other_job_or_unverified_row_metadata(self):
+        for kwargs in ({'root_id': '999'}, {'data_id': '999'}, {'href': '/remote-jobs/remote-other-999'},
+                       {'href': 'https://evil.example/remote-jobs/remote-senior-backend-engineer-example-123'},
+                       {'hidden': True}):
+            with self.subTest(kwargs=kwargs):
+                url = self.remoteok_fixture(**kwargs)
+                result = metadata.page_metadata(self.page, 'remoteok', url, attempts=1)
+                self.assertIsNone(result['workplace'])
+                self.assertIsNone(result['posted_at'])
+
+    def test_remoteok_anonymous_jsonld_requires_exact_local_title(self):
+        url = self.remoteok_fixture(posting_title='Other Engineer')
+        self.assertIsNone(metadata.page_metadata(self.page, 'remoteok', url, attempts=1)['workplace'])
+
+    def test_remoteok_explicit_office_or_hybrid_restriction_still_blocks(self):
+        for workplace, label in [('HYBRID', ''), ('ON-SITE', ''), ('TELECOMMUTE', 'Hybrid - London'),
+                                 ('TELECOMMUTE', 'On-site')]:
+            with self.subTest(workplace=workplace, label=label):
+                url = self.remoteok_fixture(workplace=workplace, label=label)
+                result = metadata.page_metadata(self.page, 'remoteok', url)
+                self.assertEqual(metadata.eligibility_reason(result, 168, True, NOW), 'not_remote')
+
+    def test_remoteok_old_posting_is_not_made_fresh_by_board_remote_evidence(self):
+        url = self.remoteok_fixture()
+        result = metadata.page_metadata(self.page, 'remoteok', url)
+        self.assertEqual(metadata.eligibility_reason(result, 168, True, NOW + dt.timedelta(days=8)), 'posting_too_old')
+
+    def test_remoteok_global_recommendation_jsonld_is_not_current_job_evidence(self):
+        url = self.remoteok_fixture(workplace=None)
+        other = {'@type': 'JobPosting', 'url': url, 'title': 'Senior Backend Engineer',
+                 'datePosted': NOW.isoformat(), 'jobLocationType': 'TELECOMMUTE'}
+        self.html += '<aside><script type="application/ld+json">' + json.dumps(other) + '</script></aside>'
+        self.page.goto(url)
+        result = metadata.page_metadata(self.page, 'remoteok', url)
+        self.assertIsNone(result['workplace'])
+
+    def test_remoteok_multiple_anonymous_postings_are_not_guessed(self):
+        other = {'@type': 'JobPosting', 'title': 'Senior Backend Engineer', 'jobLocationType': 'TELECOMMUTE'}
+        url = self.remoteok_fixture(extra_postings=[other])
+        self.assertIsNone(metadata.page_metadata(self.page, 'remoteok', url)['workplace'])
 
 
 class FeedTests(SafetyTest):

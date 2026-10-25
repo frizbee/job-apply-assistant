@@ -7,13 +7,17 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import Page, Locator
 from .base import PlatformAdapter
 
-INDEED_AUTH_PATH = re.compile(r'/(?:auth|account|accounts|login|signin|sign-in|registration)(?:/|$)', re.I)
+INDEED_AUTH_PATH = re.compile(r'/(?:auth|account|accounts|login|signin|sign-in|registration|oauth2?)(?:/|$)', re.I)
 
 INDEED_AUTH_HEADING = re.compile(r'^\s*(?:sign\s*in|log\s*in|create (?:an? |your )?account|welcome back|verify (?:your )?email|enter (?:your )?(?:email|password|code)|two.step verification)\b', re.I)
+
+class SearchResumeBlocked(RuntimeError):
+    """The one permitted post-login search return hit login/security again."""
+
 
 class IndeedAdapter(PlatformAdapter):
     def __init__(self, services):
@@ -27,7 +31,7 @@ class IndeedAdapter(PlatformAdapter):
     def indeed_auth_pending(self, page) -> bool:
         parsed = urlparse(page.url)
         host = (parsed.hostname or '').lower()
-        if host in ('accounts.indeed.com', 'account.indeed.com', 'auth.indeed.com') or self.services.INDEED_AUTH_PATH.search(parsed.path):
+        if host in ('accounts.indeed.com', 'account.indeed.com', 'auth.indeed.com', 'authentication-session-manager.indeed.com') or self.services.INDEED_AUTH_PATH.search(parsed.path):
             return True
         if page.locator('input[type="password"]:visible, input[autocomplete="username"]:visible, form[action*="/login"]:visible').count():
             return True
@@ -50,27 +54,112 @@ class IndeedAdapter(PlatformAdapter):
                 raise self.core.BrowserClosed() from None
             return False
 
-    def indeed_wait_ready(self, page, stage: str) -> bool:
-        """Wait passively through login/MFA/challenge; never reload or navigate here."""
-        state = {'url': None, 'since': None}
+    def indeed_signed_in_home(self, page, search_state) -> bool:
+        """Require a loaded, authenticated homepage, not a blank redirect/403."""
+        parsed = urlparse(page.url)
+        document = (parsed.scheme, parsed.hostname, parsed.path)
+        if (parsed.scheme != 'https' or parsed.path not in ('', '/') or not self.services.indeed_host(page)
+                or search_state.get('document_status') != 200 or search_state.get('document') != document
+                or self.core.blocked(page) or self.services.indeed_auth_pending(page)):
+            return False
+        signin = re.compile(r'^\s*(?:sign\s*in|log\s*in|iniciar sesi[oó]n|acceder|entrar)\s*$', re.I)
+        if page.get_by_role('link', name=signin).count() or page.get_by_role('button', name=signin).count():
+            return False
+        menu = page.locator('[data-gnav-element-name="AccountMenu"]:visible, #AccountMenu-button:visible, [data-testid="account-menu"]:visible, [data-testid="gnav-account-menu"]:visible')
+        signout = re.compile(r'^\s*(?:sign\s*out|log\s*out|cerrar sesi[oó]n|sair|oturumu kapat)\s*$', re.I)
+        return bool(menu.count() or page.get_by_role('link', name=signout).count()
+                    or page.get_by_role('button', name=signout).count())
+
+    def indeed_valid_search(self, url: str) -> bool:
+        parsed = urlparse(url)
+        configured = self.core.CFG['sources'].get('indeed_domain', 'www.indeed.com').lower().removeprefix('www.')
+        host = (parsed.hostname or '').lower()
+        allowed = host == configured or host.endswith('.' + configured) or host == 'indeed.com' or host.endswith('.indeed.com')
+        keywords = parse_qs(parsed.query).get('q', [])
+        return bool(parsed.scheme == 'https' and allowed and not parsed.username and not parsed.password
+                    and parsed.path.rstrip('/') == '/jobs' and len(keywords) == 1 and keywords[0].strip())
+
+    def indeed_open_search(self, page, url: str) -> bool:
+        """Observe main-document status before navigation; preserve the exact query."""
+        if not self.indeed_valid_search(url):
+            raise ValueError('Invalid Indeed search target')
+        state = {'document_status': None, 'document': None, 'generation': 0,
+                 'oauth_return_seen': False, 'auth_return_denied': False}
+        def observe(response):
+            if response.request.is_navigation_request() and response.request.frame == page.main_frame:
+                target = urlparse(response.url)
+                # Do not retain query strings (OAuth codes/state) or cookie data.
+                state.update(document_status=response.status, document=(target.scheme, target.hostname, target.path),
+                             generation=state['generation'] + 1)
+                if target.hostname == 'authentication-session-manager.indeed.com' and target.path == '/bff/oauth/callback':
+                    state['oauth_return_seen'] = True
+                if state['oauth_return_seen'] and response.status in (401, 403, 429):
+                    state['auth_return_denied'] = True
+        page.on('response', observe)
+        try:
+            if self.core.STOP.is_set():
+                raise self.core.Stopped
+            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            self.core.pause(2, 4)
+            return self.services.indeed_wait_ready(page, 'search', expected_url=url, search_state=state)
+        finally:
+            page.remove_listener('response', observe)
+
+    def indeed_wait_ready(self, page, stage: str, *, expected_url=None, search_state=None) -> bool:
+        """Wait through auth; optionally return once from a verified home to search."""
+        if stage == 'search' and expected_url is not None and not self.indeed_valid_search(expected_url):
+            raise ValueError('Invalid Indeed search target')
+        state = {'url': None, 'since': None, 'home_url': None, 'home_since': None, 'home_generation': None, 'resumed': False}
 
         def stable(p):
             if self.core.STOP.is_set():
                 raise self.core.Stopped
+            if stage == 'search' and (search_state or {}).get('auth_return_denied'):
+                raise SearchResumeBlocked('oauth_access_denied')
+            if state['resumed'] and (self.core.blocked(p) or (search_state or {}).get('document_status') in (401, 403, 429)):
+                raise SearchResumeBlocked
+            if state['resumed'] and (p.locator('input[type="password"]:visible, input[autocomplete="username"]:visible').count()
+                                     or p.get_by_role('heading', name=self.services.INDEED_AUTH_HEADING).count()):
+                raise SearchResumeBlocked
             if not self.services.indeed_ready_evidence(p, stage):
                 state.update(url=None, since=None)
+                if (stage == 'search' and expected_url and search_state is not None and not state['resumed']
+                        and self.indeed_signed_in_home(p, search_state)):
+                    now = time.monotonic()
+                    if (state['home_url'] != p.url or state['home_since'] is None
+                            or state['home_generation'] != search_state.get('generation')):
+                        state.update(home_url=p.url, home_since=now, home_generation=search_state.get('generation'))
+                    elif now - state['home_since'] >= 1:
+                        if self.core.STOP.is_set():
+                            raise self.core.Stopped
+                        if time.time() > self.core.DEADLINE:
+                            raise self.core.LimitReached
+                        state['resumed'] = True  # Reserve before navigation, even if it fails.
+                        self.core.log('Indeed sign-in homepage confirmed; returning once to the original search in the same tab.')
+                        p.goto(expected_url, wait_until='domcontentloaded', timeout=30000)
+                        state.update(home_url=None, home_since=None)
+                else:
+                    state.update(home_url=None, home_since=None)
                 return False
+            state.update(home_url=None, home_since=None)
             now = time.monotonic()
             if state['url'] != p.url or state['since'] is None:
                 state.update(url=p.url, since=now)
                 return False
             return now - state['since'] >= 1
-        if self.services.indeed_ready_evidence(page, stage):
-            stable(page)
-            page.wait_for_timeout(1100)
-            if stable(page):
-                return True
-        return self.core.wait_human(page, stable, 'finish Indeed sign-in or security verification (the app will not reload the page)', minutes=10)
+        try:
+            if self.services.indeed_ready_evidence(page, stage):
+                stable(page)
+                page.wait_for_timeout(1100)
+                if stable(page):
+                    return True
+            return self.core.wait_human(page, stable, 'finish Indeed sign-in or security verification (no reloads; one return to search after confirmed sign-in)', minutes=10)
+        except SearchResumeBlocked as error:
+            if str(error) == 'oauth_access_denied':
+                self.core.log('Indeed denied access after the OAuth return (401/403/429); stopping this source. Do not repeat login/CAPTCHA in a loop.')
+            else:
+                self.core.log('Indeed returned to login/security verification after resuming search; stopping this source without retrying.')
+            return False
 
     def indeed_apply(self, page, job: dict, applied: dict | None=None) -> str:
         if not self.services.goto(page, job['url'], 'Indeed'):

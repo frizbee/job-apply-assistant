@@ -18,7 +18,9 @@ class IndeedWaitTests(SafetyTest):
         for url in ['https://secure.indeed.com/auth', 'https://accounts.indeed.com/',
                     'https://auth.indeed.com/verify',
                     'https://www.indeed.com/account/login', 'https://www.indeed.com/login',
-                    'https://secure.indeed.com/account/verify']:
+                     'https://secure.indeed.com/account/verify',
+                     'https://secure.indeed.com/oauth/v2/authorize',
+                     'https://authentication-session-manager.indeed.com/bff/oauth/callback']:
             page.url = url
             self.assertTrue(sources.indeed_auth_pending(page), url)
 
@@ -29,7 +31,9 @@ class IndeedWaitTests(SafetyTest):
             self.assertEqual(list(sources.indeed(page)), [])
         page.goto.assert_called_once()
         self.assertIn('First+query', page.goto.call_args.args[0])
-        wait.assert_called_once_with(page, 'search')
+        self.assertEqual(wait.call_args.args, (page, 'search'))
+        self.assertEqual(wait.call_args.kwargs['expected_url'], page.goto.call_args.args[0])
+        self.assertIn('search_state', wait.call_args.kwargs)
         page.reload.assert_not_called()
 
     def test_shared_navigation_only_adds_wait_for_indeed(self):
@@ -125,6 +129,27 @@ class IndeedLoginBrowserTests(SafetyTest):
         self.assertFalse(sources.indeed_ready_evidence(self.page, 'search'))
         self.page.set_content('<div class="jobsearch-NoResult-messageContainer">No jobs found</div>')
         self.assertTrue(sources.indeed_ready_evidence(self.page, 'search'))
+
+    def test_legacy_predicate_accepts_login_but_current_wait_does_not(self):
+        self.page.goto('https://accounts.indeed.com/auth')
+        self.assertTrue(sources.page_ready(self.page))  # Identical to pinned upstream page_ready.
+        self.assertFalse(sources.indeed_ready_evidence(self.page, 'search'))
+
+    def test_legacy_predicate_accepts_homepage_without_search_cards(self):
+        self.login_complete = True
+        self.page.goto('https://www.indeed.com/')
+        self.page.set_content('<header>Indeed home</header>')
+        self.assertTrue(sources.page_ready(self.page))
+        self.assertFalse(sources.indeed_ready_evidence(self.page, 'search'))
+
+    def test_both_predicates_reject_cloudflare_and_accept_results(self):
+        self.login_complete = True
+        self.page.goto('https://www.indeed.com/jobs')
+        self.assertTrue(sources.page_ready(self.page))
+        self.assertTrue(sources.indeed_ready_evidence(self.page, 'search'))
+        self.page.set_content('<title>Just a moment...</title><p>Verify you are human</p>')
+        self.assertFalse(sources.page_ready(self.page))
+        self.assertFalse(sources.indeed_ready_evidence(self.page, 'search'))
 
     def test_login_overlay_blocks_cards_and_application_continue_buttons(self):
         self.login_complete = True

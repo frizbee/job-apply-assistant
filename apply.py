@@ -1091,13 +1091,14 @@ def job_location_ok(text: str) -> bool:
 def check_job_eligibility(job: dict, applied: dict) -> bool:
     """Shared final gate: search URLs and board names are not eligibility evidence."""
     search = CFG["search"]
-    reason = job_metadata.eligibility_reason(job.get("metadata") or {}, search["posted_within_hours"],
+    reason = job.get('detail_issue') or job_metadata.eligibility_reason(job.get("metadata") or {}, search["posted_within_hours"],
                                              search.get("remote_only", False))
     # A board's location label is not an employment-eligibility rule. Search
     # regions come from user settings; never infer allowed regions from the CV.
     if reason is None:
         return check_description_instructions(job, applied)
-    unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown", 'location_unknown')
+    unknown = reason in ("posting_date_unknown", "posting_date_future", "workplace_unknown", 'location_unknown',
+                         'description_unknown', 'detail_identity_unknown')
     status = "metadata_manual" if unknown else reason
     log(f"- skip [{reason}] {job['title']} @ {job['company']}")
     if unknown:

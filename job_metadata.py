@@ -4,6 +4,7 @@ from email.utils import parsedate_to_datetime
 import math
 import re
 from urllib.parse import parse_qsl, urlparse, urljoin
+from platforms.remoteok import REMOTEOK_ROOT_JS
 
 UTC = dt.timezone.utc
 
@@ -151,6 +152,9 @@ DETAILS_JS = r"""() => {
 
 METADATA_JS = r"""source => {
     const postings = [];
+    const visible = e => e && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+    const remote = source === 'remoteok' ? (""" + REMOTEOK_ROOT_JS + r""")() : {root:null,id:null};
+    const remoteRoot = remote.root, remoteId = remote.id;
     function visit(value) {
         if (Array.isArray(value)) return value.forEach(visit);
         if (!value || typeof value !== 'object') return;
@@ -159,7 +163,9 @@ METADATA_JS = r"""source => {
         if (value['@graph']) visit(value['@graph']);
         if (value.mainEntity) visit(value.mainEntity);
     }
-    for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+    const scripts = source === 'remoteok' ? (remoteRoot?.querySelectorAll('script[type="application/ld+json"]') || [])
+        : document.querySelectorAll('script[type="application/ld+json"]');
+    for (const el of scripts) {
         try { visit(JSON.parse(el.textContent)); } catch (_) {}
     }
     // Only job-detail metadata areas; never search the description or recommendations.
@@ -168,9 +174,14 @@ METADATA_JS = r"""source => {
         wellfound: '[data-test="job-header"], [data-testid="job-header"], [data-test="job-detail-header"]',
         indeed: '#jobDetailsSection, #jobLocationText, .jobsearch-JobMetadataFooter, [data-testid="job-age"]'
     };
-    const roots = source === 'linkedin' ? (""" + LINKEDIN_ROOTS_JS + r""")() : [...document.querySelectorAll(selectors[source] || '[data-autoapply-job-metadata]')]
+    const roots = source === 'remoteok' ? (remoteRoot ? [remoteRoot] : [])
+        : source === 'linkedin' ? (""" + LINKEDIN_ROOTS_JS + r""")() : [...document.querySelectorAll(selectors[source] || '[data-autoapply-job-metadata]')]
         .filter(e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
-    return {postings, title: document.querySelector('h1')?.innerText || '', labels: roots.map(e => e.innerText),
+    const remoteLabels = remoteRoot ? [...remoteRoot.querySelectorAll('.location, [itemprop="jobLocationType"], [data-workplace-type]')].filter(visible) : [];
+    return {postings, title: source === 'remoteok' ? (remoteRoot?.querySelector('[itemprop="title"], h2')?.innerText || '')
+            : (document.querySelector('h1')?.innerText || ''),
+        labels: source === 'remoteok' ? remoteLabels.map(e => e.getAttribute('data-workplace-type') || e.innerText) : roots.map(e => e.innerText),
+        scoped_job_id: remoteRoot ? remoteId : null,
         language: document.documentElement.lang, roots: roots.length,
         times: roots.flatMap(e => [...e.querySelectorAll('time[datetime]')].map(t => t.dateTime))};
 }"""
@@ -230,5 +241,6 @@ def page_metadata(page, source: str, expected_url: str, *, attempts: int = 3) ->
             'description': posting.get('description', ''),
             'diagnostic': {'language': raw.get('language', ''), 'header_roots': raw.get('roots', len(labels)),
                            'inspections': inspections,
-                           'jsonld_postings': len(raw.get('postings', [])), 'date_evidence': [v[:250] for v in dates if isinstance(v, str) and posting_time(v) is not None],
+                            'jsonld_postings': len(raw.get('postings', [])), 'scoped_job_id': raw.get('scoped_job_id'),
+                            'date_evidence': [v[:250] for v in dates if isinstance(v, str) and posting_time(v) is not None],
                            'reason': None if posted else 'No parseable date in matched job header/structured data after bounded hydration wait'}}

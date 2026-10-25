@@ -70,6 +70,8 @@ def page_ready(page) -> bool:
 
 
 def goto(page, url: str, what: str) -> bool:
+    if what.casefold() == 'indeed' and urlparse(url).path.rstrip('/') == '/jobs':
+        return IndeedAdapter(sys.modules[__name__]).indeed_open_search(page, url)
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     core.pause(2, 4)
     if what.casefold() == 'indeed':
@@ -97,6 +99,10 @@ def slug(s: str) -> str:
 
 def remoteok(page):
     return RemoteOKAdapter(sys.modules[__name__]).remoteok(page)
+
+
+def remoteok_details(page, job):
+    return RemoteOKAdapter(sys.modules[__name__]).prepare_job(page, job)
 
 
 # ---------------------------------------------------------------- Himalayas
@@ -161,8 +167,8 @@ def indeed_ready_evidence(page, stage: str) -> bool:
     return IndeedAdapter(sys.modules[__name__]).indeed_ready_evidence(page, stage)
 
 
-def indeed_wait_ready(page, stage: str) -> bool:
-    return IndeedAdapter(sys.modules[__name__]).indeed_wait_ready(page, stage)
+def indeed_wait_ready(page, stage: str, *, expected_url=None, search_state=None) -> bool:
+    return IndeedAdapter(sys.modules[__name__]).indeed_wait_ready(page, stage, expected_url=expected_url, search_state=search_state)
 
 
 def indeed_apply(page, job: dict, applied: dict | None=None) -> str:
@@ -182,6 +188,8 @@ SOURCES = {
     "himalayas": himalayas,
     "weworkremotely": weworkremotely,
 }
+
+DETAIL_LOADERS = {'remoteok': remoteok_details}
 
 
 def run(apply_module, page, applied: dict, count: int) -> int:
@@ -207,6 +215,20 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 if not core.should_visit_job(applied, job['id']):
                     continue
                 core.METRICS.mark('evaluated', job['id'])
+                loader = DETAIL_LOADERS.get(name)
+                if loader:
+                    preliminary = job_metadata.eligibility_reason(job.get('metadata') or {}, core.CFG['search']['posted_within_hours'],
+                                                                  core.CFG['search'].get('remote_only', False))
+                    if preliminary in ('posting_too_old', 'not_remote'):
+                        core.check_job_eligibility(job, applied)
+                        continue
+                    loader(page, job)
+                    if job.get('detail_issue'):
+                        core.check_job_eligibility(job, applied)
+                        if job.get('detail_source_blocked'):
+                            core.log(f'  Access to {name} was blocked; moving to the next source.')
+                            break
+                        continue
                 reason = (core.job_ok(job["title"], job["company"], job["desc"])
                           or ("applied_elsewhere" if core.applied_elsewhere(applied, job["title"], job["company"]) else None))
                 if reason:
@@ -217,7 +239,7 @@ def run(apply_module, page, applied: dict, count: int) -> int:
                 # Resolve unknown metadata from this job's detail page, not search cards.
                 preliminary = job_metadata.eligibility_reason(metadata, core.CFG["search"]["posted_within_hours"],
                                                                core.CFG["search"].get("remote_only", False))
-                if preliminary in ("posting_date_unknown", "posting_date_future", "workplace_unknown"):
+                if not loader and preliminary in ("posting_date_unknown", "posting_date_future", "workplace_unknown"):
                     if page.url == job["url"] or goto(page, job["url"], name):
                         metadata = job_metadata.merge_metadata(metadata, core.read_job_metadata(page, name, job["url"]))
                 job["metadata"] = metadata
