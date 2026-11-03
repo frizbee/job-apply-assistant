@@ -15,6 +15,9 @@ with patch.dict(os.environ, {"AUTOAPPLY_HOME": TEST_HOME.name}):
 class SafetyTest(unittest.TestCase):
     def setUp(self):
         cfg = copy.deepcopy(apply.CFG)
+        # These fixtures exercise the generic workflow independently of the
+        # project owner's AGENTS.md policy. Dedicated policy tests enable it.
+        cfg.setdefault('application_policy', {})['enabled'] = False
         self.enterContext(patch.object(apply, "CFG", cfg))
         self.enterContext(patch.object(apply, "PROFILE", cfg["profile"]))
         self.enterContext(patch.object(apply, "SETTINGS", {

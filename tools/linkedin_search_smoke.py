@@ -44,6 +44,13 @@ def main():
                 result = super().search_page(keyword, location, index)
             except linkedin_search.SearchUnavailable as e:
                 failures.append({'keyword': keyword, 'region': location, 'page': index + 1, 'error': str(e)})
+                # Evidence is private/ignored and captured before the tab closes.
+                prefix = folder / f'failure-{len(failures)}'
+                try:
+                    prefix.with_suffix('.html').write_text(self.page.content(), encoding='utf-8')
+                    self.page.screenshot(path=str(prefix.with_suffix('.png')))
+                except Exception as diagnostic_error:
+                    failures[-1]['diagnostic_error'] = str(diagnostic_error)[:250]
                 raise
             dom = self.page.locator('[componentkey="SearchResultsMainContent"] [componentkey^="job-card-component-ref-"]').evaluate_all('es=>es.filter(e=>e.getClientRects().length).map(e=>({id:e.getAttribute("componentkey").replace("job-card-component-ref-",""),text:e.innerText.slice(0,600)}))')
             unique = {entry['id']: entry for entry in dom if re.fullmatch(r'[0-9]+', entry['id'])}
@@ -54,10 +61,7 @@ def main():
                     sample_ids.append(key)
                     break
             params = parse_qs(urlparse(self.page.url).query)
-            controls = {}
-            for name in ['Remote', 'Easy Apply']:
-                control = self.page.locator(f'[componentkey="JobsSearchFilters"] input[aria-label="Filter by {name}"]')
-                controls[name] = control.first.is_checked() if control.count() else None
+            controls = dict(self.verified_filters)
             row = {'keyword': keyword, 'region': location, 'page': index + 1, 'ids': result['ids'],
                    'count': len(result['ids']), 'native_region': self.location_label(), 'visible_dom_count': len(unique),
                    'dom_ids_in_collected': set(unique) <= set(result['ids']), 'has_next': result['has_next'],

@@ -13,6 +13,11 @@ function element(attrs) {
     value: "", textContent: "", innerHTML: "", checked: false, disabled: false, style: {}, children: [],
     replaceChildren(...children) { this.children = children; },
     append(...children) { this.children.push(...children); },
+    insertBefore(child, before) {
+      this.children = this.children.filter(item => item !== child);
+      const index = this.children.indexOf(before);
+      this.children.splice(index < 0 ? this.children.length : index, 0, child);
+    },
     setAttribute(name, value) { this[name] = value; },
     querySelector(selector) { return this.children.find(e => '.' + e.className === selector); },
     classList: { toggle(name, on) { on ? classes.add(name) : classes.delete(name); },

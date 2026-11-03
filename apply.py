@@ -41,6 +41,10 @@ import llm_config
 import llm_credentials
 import job_metadata
 import job_relevance
+import resume_match
+import application_policy
+import candidate_workflow
+import policy_discovery
 import job_rechecks
 import linkedin_search
 import application_answers
@@ -280,7 +284,7 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
     applied[job_id] = {**previous, "status": status, "date": dt.date.today().isoformat(), "key": job_key(title, company),
                        "title": title, "company": company, "url": url or f"https://www.linkedin.com/jobs/view/{job_id}/",
                        'evaluated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'reason': status,
-                        'evaluation_revision': job_rechecks.revision(CFG, SETTINGS)}
+                         'evaluation_revision': job_rechecks.revision(CFG, SETTINGS), 'test_mode': DRY_RUN}
     binding = application_identity.ledger(sys.modules[__name__]).bindings.get(job_id)
     if binding:
         applied[job_id].update(binding)
@@ -289,16 +293,51 @@ def record(applied: dict, job_id: str, title: str, company: str, status: str, ur
     applied[job_id].pop('metadata_diagnostic', None)
     applied[job_id].pop('technology_diagnostic', None)
     applied[job_id].pop('title_diagnostic', None)
+    if application_policy.active(sys.modules[__name__]):
+        candidate = candidate_workflow.store(sys.modules[__name__]).load()['jobs'].get(job_id, {})
+        if candidate:
+            applied[job_id].update(resume_sha256=candidate.get('resume_sha256'),
+                                  match_score=candidate.get('assessment', {}).get('score'),
+                                  assessment_version=candidate.get('assessment', {}).get('version'),
+                                  policy_version=application_policy.VERSION)
     decisions.append(job_rechecks.snapshot(applied[job_id]))
     applied[job_id]['decisions'] = decisions
     write_applied(applied)
-    new_file = not LOG_FILE.exists()
-    with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
+    if application_policy.active(sys.modules[__name__]):
+        candidate_workflow.track(sys.modules[__name__], job_id, status,
+                                 submission_url=applied[job_id]['url'], outcome_at=dt.datetime.now(dt.timezone.utc).isoformat())
+    append_history_row(LOG_FILE, ["date", "job_id", "title", "company", "status", "url"],
+                       [dt.datetime.now().isoformat(timespec="minutes"), job_id, title, company,
+                        status, url or f"https://www.linkedin.com/jobs/view/{job_id}/"])
+
+
+def append_history_row(path: Path, fields: list[str], values: list) -> None:
+    """Persist the actual execution mode; legacy rows remain explicitly unknown."""
+    header = [*fields, 'test_mode']
+    if path.exists() and path.stat().st_size:
+        with path.open(newline='', encoding='utf-8') as stream:
+            reader = csv.reader(stream)
+            previous_header = next(reader)
+            if previous_header == fields:
+                rows = list(reader)
+            elif previous_header == header:
+                rows = None
+            else:
+                raise RuntimeError(f'Unexpected history columns in {path.name}; refusing to overwrite history')
+        if rows is not None:
+            job_rechecks.backup([path], path.parent / 'backups')
+            temporary = path.with_suffix('.tmp')
+            with temporary.open('w', newline='', encoding='utf-8') as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows([*row, ''] for row in rows)
+            temporary.replace(path)
+    new_file = not path.exists() or not path.stat().st_size
+    with path.open('a', newline='', encoding='utf-8') as stream:
+        writer = csv.writer(stream)
         if new_file:
-            w.writerow(["date", "job_id", "title", "company", "status", "url"])
-        w.writerow([dt.datetime.now().isoformat(timespec="minutes"), job_id, title, company,
-                    status, url or f"https://www.linkedin.com/jobs/view/{job_id}/"])
+            writer.writerow(header)
+        writer.writerow([*values, 'true' if DRY_RUN else 'false'])
 
 
 BLOCKED_RE = re.compile(r"just a moment|attention required|additional verification|security check|"
@@ -765,6 +804,10 @@ def submit_application(page: Page, primary: Locator, job_id: str, title: str, co
     """Durably track every intentional final submit, even on timeout/STOP/crash."""
     if STOP.is_set():
         raise Stopped
+    if application_policy.active(sys.modules[__name__]) and time.time() > DEADLINE:
+        raise LimitReached('Runtime limit reached before submission')
+    if application_policy.active(sys.modules[__name__]) and not candidate_workflow.submission_allowed(sys.modules[__name__], job_id):
+        return 'manual_review'
     identity = application_identity.application_key(url, sys.modules[__name__])
     if identity:
         existing = applied if applied is not None else load_applied()
@@ -916,16 +959,12 @@ def check_ats_form(page: Page, document: Locator, form: Locator, ats: str) -> No
 
 APPLY_BTN_RE = re.compile(r"\bapply\b|başvur", re.I)
 SUBMIT_RE = re.compile(r"submit|send application|apply|başvur|gönder", re.I)
-CAPTCHA_SEL = "iframe[src*='hcaptcha'][title*='challenge'], iframe[src*='recaptcha'][title*='challenge']:visible"
+CAPTCHA_SEL = "iframe[src*='hcaptcha'][title*='challenge']:visible, iframe[src*='recaptcha'][title*='challenge']:visible"
 
 
 def record_manual(job_id: str, title: str, company: str, url: str, reason: str) -> None:
-    new_file = not MANUAL_FILE.exists()
-    with MANUAL_FILE.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new_file:
-            w.writerow(["date", "job_id", "title", "company", "reason", "apply_url"])
-        w.writerow([dt.date.today().isoformat(), job_id, title, company, reason, url])
+    append_history_row(MANUAL_FILE, ["date", "job_id", "title", "company", "reason", "apply_url"],
+                       [dt.date.today().isoformat(), job_id, title, company, reason, url])
 
 
 def require_manual_review(page: Page, form: Locator, unanswered: list[str], job_id: str,
@@ -983,7 +1022,7 @@ def ats_apply_url(page: Page, url: str) -> tuple[str | None, str]:
     return ATSEngine(sys.modules[__name__]).ats_apply_url(page, url)
 
 
-EXT_STATE = {"count": 0, "last": 0.0}
+EXT_STATE = {"count": 0, "last": 0.0}  # Confirmed external sends; last form-opening time.
 
 
 def apply_external(page: Page, job_id: str, title: str, company: str, applied: dict | None = None) -> str:
@@ -1042,6 +1081,8 @@ def job_info(page: Page) -> tuple[str, str, str]:
 
 def job_ok(title: str, company: str, description: str) -> str | None:
     """Return None for an eligible job, otherwise the rejection reason."""
+    if application_policy.active(sys.modules[__name__]):
+        return None if title.strip() and company.strip() else 'identity_unknown'
     f = CFG["filters"]
     t, d = title.lower(), description.lower()
     if not title.strip() or not company.strip():
@@ -1091,8 +1132,13 @@ def job_location_ok(text: str) -> bool:
 def check_job_eligibility(job: dict, applied: dict) -> bool:
     """Shared final gate: search URLs and board names are not eligibility evidence."""
     search = CFG["search"]
+    if application_policy.active(sys.modules[__name__]) and not str(job['id']).isdigit():
+        if not check_resume_match(job, applied):
+            return False
     reason = job.get('detail_issue') or job_metadata.eligibility_reason(job.get("metadata") or {}, search["posted_within_hours"],
-                                             search.get("remote_only", False))
+                                              search.get("remote_only", False))
+    if (job.get('metadata') or {}).get('active') is False:
+        reason = 'job_closed'
     # A board's location label is not an employment-eligibility rule. Search
     # regions come from user settings; never infer allowed regions from the CV.
     if reason is None:
@@ -1153,6 +1199,8 @@ def should_visit_job(applied: dict, job_id: str) -> bool:
     previous = applied.get(job_id)
     if previous is None or can_retry(previous['status']):
         return True
+    if application_policy.reassess(sys.modules[__name__], previous):
+        return True
     if not SETTINGS.get('recheck_enabled', CFG.get('rechecks', {}).get('enabled', False)):
         METRICS.mark('history_skipped', job_id)
         return False
@@ -1186,7 +1234,8 @@ def record_relevance_decision(applied: dict, job_id: str, title: str, company: s
 
 
 def mark_evaluation_passed(applied: dict, job_id: str, title: str, company: str, url: str) -> None:
-    if applied.get(job_id, {}).get('status') in job_rechecks.RECHECKABLE:
+    previous = applied.get(job_id, {})
+    if previous.get('status') in job_rechecks.RECHECKABLE or application_policy.reassess(sys.modules[__name__], previous):
         record(applied, job_id, title, company, 'evaluation_passed', url)
 
 
@@ -1235,7 +1284,9 @@ def ask_settings() -> None:
 def load_settings() -> dict:
     saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")) if SETTINGS_FILE.exists() else {}
     llm_config.resolve(CFG, saved.get('llm_preferences', {}), require_model=False)
-    SETTINGS.update({"resume": PROFILE["resume_file"], "salary": "75000", "currency": "USD", "english": "3", "notice": "14", **saved})
+    root_resume = ROOT / 'CV_Andre2026.pdf'
+    default_resume = PROFILE['resume_file'] or (str(root_resume) if root_resume.is_file() else '')
+    SETTINGS.update({"resume": default_resume, "salary": "75000", "currency": "USD", "english": "3", "notice": "14", **saved})
     return SETTINGS
 
 
@@ -1245,6 +1296,7 @@ def finalize_settings() -> None:
         from cv_profile import validate
         validate(SETTINGS["cv_profile"])
     current_llm_config(require_model=False)
+    resume_match.options(CFG)
     job_relevance.validate_settings(SETTINGS)
     locations = selected_locations()
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1252,6 +1304,7 @@ def finalize_settings() -> None:
     CFG['search']['locations'] = locations
     if SETTINGS.get("cv_profile"):
         apply_cv_profile(SETTINGS["cv_profile"])
+    application_policy.activate(sys.modules[__name__])
     log(f"CV: {Path(SETTINGS['resume']).name} | salary: {', '.join(f'{v} {c}' for c, v in (SETTINGS.get('monthly_salary_by_currency') or {}).items()) + ' /month' if SETTINGS.get('monthly_salary_by_currency') else SETTINGS['salary'] + ' /year'} | "
         f"English: {ENGLISH_LEVELS[SETTINGS['english']][0]} | notice: {SETTINGS['notice']} days")
 
@@ -1347,6 +1400,8 @@ def cv_setup() -> None:
 
 def selected_locations() -> list[str]:
     """Use the user's list verbatim; config is used only if no list was saved."""
+    if application_policy.active(sys.modules[__name__]):
+        return list(application_policy.LOCATIONS)
     locations = SETTINGS['locations'] if 'locations' in SETTINGS else CFG['search']['locations']
     if not isinstance(locations, list) or not locations or any(not isinstance(loc, str) or not loc.strip() for loc in locations):
         raise ValueError('Enter at least one search country / region')
@@ -1402,11 +1457,12 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         previous = applied.get(job_id)
         if previous and not can_retry(previous['status']):
             authorized_recheck = (previous['status'] in job_rechecks.RECHECKABLE
-                                 and previous.get('recheck', {}).get('run_id') == RECHECK_STATE['id'])
+                                  and previous.get('recheck', {}).get('run_id') == RECHECK_STATE['id'])
+            authorized_recheck = authorized_recheck or application_policy.reassess(sys.modules[__name__], previous)
             if not authorized_recheck and not deferred_review.authorized(job_id, previous):
                 METRICS.mark('history_skipped', job_id)
                 return False
-        if submission_quota_status('linkedin'):
+        if submission_quota_status('linkedin') and not application_policy.active(sys.modules[__name__]):
             return False
         page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded")
         pause(2.5, 4.5)
@@ -1419,8 +1475,15 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
             return False
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
         job = {"id": job_id, "title": title, "company": company, "url": url, 'desc': desc,
-               "metadata": read_job_metadata(page, "linkedin", url)}
+                "metadata": read_job_metadata(page, "linkedin", url)}
+        if application_policy.active(sys.modules[__name__]) and not check_resume_match(job, applied):
+            return False
         if not check_job_eligibility(job, applied):
+            return False
+        if not application_policy.active(sys.modules[__name__]) and not check_resume_match(job, applied):
+            return False
+        if application_policy.active(sys.modules[__name__]) and submission_quota_status('linkedin'):
+            candidate_workflow.save(sys.modules[__name__], job, status='eligible_deferred_limit', reason='submit_limit')
             return False
         log(f"> {title} @ {company}")
         mark_evaluation_passed(applied, job_id, title, company, url)
@@ -1440,6 +1503,10 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         if browser_closed(e):
             raise BrowserClosed() from None
         log(f"  ! error {job_id}: {e.__class__.__name__}: {str(e)[:150]}")
+        if application_policy.active(sys.modules[__name__]):
+            candidate_workflow.store(sys.modules[__name__]).put(job_id, status='discovery_error',
+                job_url=f'https://www.linkedin.com/jobs/view/{job_id}/',
+                reason='Job processing failed: ' + type(e).__name__, policy_version=application_policy.VERSION)
         METRICS.mark('errors', job_id)
         screenshot(page, f"{job_id}_error")
         try:
@@ -1447,6 +1514,52 @@ def process_job(page: Page, applied: dict, job_id: str) -> bool:
         except Exception:
             pass
         return False
+
+
+def check_resume_match(job: dict, applied: dict) -> bool:
+    """LinkedIn-only CV gate; insufficient evidence never authorizes a form."""
+    core = sys.modules[__name__]
+    if application_policy.active(core):
+        entry = candidate_workflow.evaluate(core, job)
+        evidence = entry['assessment']
+        score = evidence.get('score')
+        log(f"  JD/CV evidence match: {score:.1f}% (minimum 70%)" if score is not None
+            else '  ? JD assessment pending; candidate saved, not rejected')
+        if entry['status'] != 'eligible':
+            reason = entry['status'] + ': ' + json.dumps(entry.get('blockers') or evidence.get('diagnostic', ''), ensure_ascii=False)
+            record_manual(job['id'], job['title'], job['company'], job['url'], reason)
+            METRICS.mark('rejected' if entry['status'] in ('below_threshold', 'geography_excluded') else 'manual', job['id'])
+            return False
+        return True
+    enabled, threshold = resume_match.options(CFG)
+    if not enabled:
+        return True
+    try:
+        config = current_llm_config()
+        if not config.legacy_supported:
+            raise ValueError('Selected provider has no implemented JD assessment adapter')
+        evidence = resume_match.from_file(job.get('desc', ''), SETTINGS.get('resume', ''),
+                                          minimum_percent=threshold, key=find_key(), log=log,
+                                          max_output_tokens=config.max_output_tokens,
+                                          timeout_seconds=config.timeout_seconds)
+    except Exception as exc:
+        evidence = {'reason': 'resume_match_unknown', 'score': None,
+                    'error': type(exc).__name__, 'threshold': threshold}
+    score = evidence['score']
+    log(f"  JD/CV evidence match: {score:.1f}% (minimum {threshold}%)" if score is not None
+        else '  ? CV match unavailable; manual review required')
+    reason = evidence['reason']
+    if reason:
+        status = 'relevance_manual' if reason == 'resume_match_unknown' else reason
+        record(applied, job['id'], job['title'], job['company'], status, job['url'])
+        if status == 'relevance_manual':
+            record_manual(job['id'], job['title'], job['company'], job['url'], reason)
+        METRICS.mark('manual' if status == 'relevance_manual' else 'rejected', job['id'])
+    else:
+        record(applied, job['id'], job['title'], job['company'], 'evaluation_passed', job['url'])
+    applied[job['id']]['resume_match'] = evidence
+    write_applied(applied)
+    return reason is None
 
 
 def linkedin_login(page: Page) -> bool:
@@ -1478,6 +1591,7 @@ def launch(pw):
 def run_bot(*, reset_stop: bool = True) -> int:
     """Run the application workflow after SETTINGS have been prepared."""
     global DEADLINE
+    application_policy.activate(sys.modules[__name__])
     METRICS.reset()
     if SETTINGS.get("cv_profile") is not None:
         from cv_profile import validate

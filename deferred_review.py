@@ -64,12 +64,13 @@ def authorized(job_id, previous):
 
 
 class Session:
-    def __init__(self, job_id, test_mode, cv_hash=None):
+    def __init__(self, job_id, test_mode, cv_hash=None, *, title='', company='', job_url=''):
         self.job_id, self.test_mode = job_id, test_mode
         self.cv_hash = cv_hash
         self.description_instructions = []
         self.lock = threading.Lock()
-        self.state = {'job_id': job_id, 'test_mode': test_mode, 'phase': 'opening', 'issues': []}
+        self.state = {'job_id': job_id, 'title': title, 'company': company, 'job_url': job_url,
+                      'test_mode': test_mode, 'phase': 'opening', 'issues': []}
         self.command = None
 
     def public(self):

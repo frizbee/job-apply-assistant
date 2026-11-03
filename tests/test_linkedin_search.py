@@ -60,6 +60,26 @@ class SearchFlowTests(SafetyTest):
             generator.close()
         factory.return_value.close.assert_called_once()
 
+    def test_repeated_search_error_stops_before_exhausting_titles_and_regions(self):
+        apply.CFG['search'].update(keywords=['First', 'Second'], pages_per_search=1)
+        apply.SETTINGS['locations'] = ['US', 'Canada', 'EU']
+        with patch.object(search, 'LinkedInSearch') as factory:
+            factory.return_value.search_page.side_effect = search.SearchUnavailable('Remote cannot be verified')
+            self.assertEqual(list(apply.job_lists(object())), [])
+        self.assertEqual(factory.return_value.search_page.call_count, 2)
+        factory.return_value.close.assert_called_once()
+        self.assertEqual(apply.METRICS.snapshot()['searches_failed'], 2)
+
+    def test_success_resets_consecutive_search_error_counter(self):
+        apply.CFG['search'].update(keywords=['First'], pages_per_search=1)
+        apply.SETTINGS['locations'] = ['US', 'Canada', 'EU', 'UK']
+        failure = search.SearchUnavailable('Remote cannot be verified')
+        with patch.object(search, 'LinkedInSearch') as factory:
+            factory.return_value.search_page.side_effect = [
+                failure, {'ids': ['1'], 'has_next': False}, failure, failure]
+            self.assertEqual(list(apply.job_lists(object())), [['1']])
+        self.assertEqual(factory.return_value.search_page.call_count, 4)
+
 
 @unittest.skipUnless(os.getenv('AUTOAPPLY_BROWSER_TESTS') == '1', 'offline LinkedIn DOM fixtures')
 class SearchBrowserTests(SafetyTest):
@@ -83,6 +103,8 @@ class SearchBrowserTests(SafetyTest):
         self.ignore_experience = False
         self.empty_first_location = False
         self.always_empty_location = False
+        self.workplace_dropdown = False
+        self.ignore_workplace = False
         apply.CFG['search']['experience_levels'] = []
         self.requests = []
         self.ctx.route('**/*', self.route)
@@ -102,14 +124,23 @@ class SearchBrowserTests(SafetyTest):
         selected = params.get('nativeExperience', [''])[0].split(',') if not self.ignore_experience else []
         options = ''.join(f'<div><input type="checkbox" id="exp-{i}" aria-label="{name}" {"checked" if name in selected else ""}><label for="exp-{i}">{name}</label></div>'
                           for i, name in enumerate(search.EXPERIENCE_LEVELS))
+        workplace = params.get('nativeWorkplace', [''])[0].split(',') if not self.ignore_workplace else []
+        workplace_options = ''.join(f'<div><input type="checkbox" id="wp-{i}" aria-label="{name}" {"checked" if name in workplace else ""}><label for="wp-{i}" style="display:inline-block;width:20px;height:20px"></label></div>'
+                                    for i, name in enumerate(['Hybrid', 'On-site', 'Remote']))
+        remote = '<div><input type="checkbox" id="remote" aria-label="Filter by Remote" checked><label for="remote">Remote</label></div>'
+        if self.workplace_dropdown:
+            summary = 'Remote' if workplace == ['Remote'] else 'Workplace Type'
+            remote = f'''<div role="button" tabindex="0" aria-expanded="false" onclick="document.getElementById('wp-menu').style.display='block'">
+                <div aria-label="Filter by {summary}"><input type="checkbox" {"checked" if workplace else ""}><label>{summary}</label></div></div>'''
         body = f'''<meta charset="utf-8"><input componentkey="semanticSearchBox" value="{html.escape(keyword, quote=True)}">
         <div componentkey="searchResultsHeaderComponent"><p>2 results</p><div role="button" tabindex="0" onclick="document.getElementById('popup').style.display='block'">
         <span aria-label="Location {region}">{region}</span></div></div>
         <div id="popup" style="display:none"><div role="textbox" contenteditable="true" aria-label="Location" oninput="suggest(this.innerText)"></div><div id="semanticSearchBoxLocationList"></div></div>
-        <div componentkey="JobsSearchFilters"><div><input type="checkbox" id="remote" aria-label="Filter by Remote" checked><label for="remote">Remote</label></div>
+        <div componentkey="JobsSearchFilters">{remote}
         <div><input type="checkbox" id="easy" aria-label="Filter by Easy Apply"><label for="easy">Easy Apply</label></div>
         <div role="button" tabindex="0" onclick="document.getElementById('exp-menu').style.display='block'"><span aria-label="Filter by Experience level">Experience level</span></div></div>
         <div id="exp-menu" style="display:none">{options}<div><a href="#" onclick="applyExperience(event)">Show results</a></div></div>
+        <div id="wp-menu" style="display:none">{workplace_options}<a href="#" onclick="applyWorkplace(event)">Show results</a></div>
         <aside><a href="/jobs/view/999/">Selected detail / recommendation</a><div componentkey="job-card-component-ref-999" role="button">Not a result</div></aside>
         <div componentkey="SearchResultsMainContent"><section id="cards"><div componentkey="job-card-component-ref-1" role="button"><div componentkey="job-card-component-ref-1">First</div></div><div componentkey="job-card-component-ref-2">Second</div></section>
         <button type="button" data-testid="pagination-controls-next-button-visible" onclick="nextPage()">Next</button>
@@ -121,7 +152,8 @@ class SearchBrowserTests(SafetyTest):
             if({str(self.always_empty_location).lower()} || ({str(self.empty_first_location).lower()} && locationInputs===1))return;
             const label=value==='Latin America'?'Latin America':value==='Europe'?'European Union':null;
             if(label){{let a=document.createElement('a');a.textContent=label;a.href='https://www.linkedin.com/jobs/search-results/?geoId=111';out.appendChild(a)}}}}
-        document.addEventListener('keydown',e=>{{if(e.key==='Escape'){{document.getElementById('exp-menu').style.display='none';document.getElementById('popup').style.display='none'}}}});
+        document.addEventListener('keydown',e=>{{if(e.key==='Escape'){{document.getElementById('wp-menu').style.display='none';document.getElementById('exp-menu').style.display='none';document.getElementById('popup').style.display='none'}}}});
+        function applyWorkplace(event){{event.preventDefault();let u=new URL(location.href);u.searchParams.set('nativeWorkplace',[...document.querySelectorAll('#wp-menu input:checked')].map(e=>e.getAttribute('aria-label')).join(','));location.href=u.href;}}
         function applyExperience(event){{event.preventDefault();let u=new URL(location.href);u.searchParams.set('nativeExperience',[...document.querySelectorAll('#exp-menu input:checked')].map(e=>e.getAttribute('aria-label')).join(','));location.href=u.href;}}
         function nextPage(){{
             if(!{str(self.repeated).lower()})document.getElementById('cards').innerHTML='<div componentkey="job-card-component-ref-3">Third</div><div componentkey="job-card-component-ref-4">Fourth</div>';
@@ -235,8 +267,70 @@ class SearchBrowserTests(SafetyTest):
         with self.assertRaisesRegex(search.SearchUnavailable, 'Remote filter was changed'):
             self.engine.search_page('Ruby', 'Latin America', 1)
 
+    def test_workplace_dropdown_applies_only_remote_and_survives_pagination(self):
+        self.workplace_dropdown = True
+        self.assertEqual(self.engine.search_page('Ruby', 'Latin America')['ids'], ['1', '2'])
+        self.assertEqual(parse_qs(urlparse(self.engine.page.url).query)['nativeWorkplace'], ['Remote'])
+        self.assertTrue(self.engine.verified_filters['Remote'])
+        self.assertEqual(self.engine.search_page('Ruby', 'Latin America', 1)['ids'], ['3', '4'])
+        self.assertFalse(self.engine.page.locator('#wp-menu').is_visible())
+
+    def test_ignored_workplace_selection_blocks_collection(self):
+        self.workplace_dropdown = True
+        self.ignore_workplace = True
+        with self.assertRaisesRegex(search.SearchUnavailable, 'Remote filter was changed or ignored'):
+            self.engine.search_page('Ruby', 'Latin America')
+
+    def test_workplace_remote_plus_hybrid_is_not_remote_only(self):
+        self.workplace_dropdown = True
+        self.engine.search_page('Ruby', 'Latin America')
+        self.engine.page.locator('#wp-menu input[aria-label="Hybrid"]').evaluate('e=>e.checked=true')
+        with self.assertRaisesRegex(search.SearchUnavailable, 'Remote filter was changed or ignored'):
+            self.engine.search_page('Ruby', 'Latin America', 1)
+
+    def test_disabling_remote_clears_all_workplace_restrictions(self):
+        self.workplace_dropdown = True
+        self.engine.search_page('Ruby', 'Latin America')
+        self.engine.checkbox('Remote', False)
+        self.assertFalse(self.engine.verified_filters['Remote'])
+        self.assertEqual(self.engine.page.locator('#wp-menu input:checked').count(), 0)
+
     def test_filter_hydration_gap_is_waited_for(self):
         self.engine.search_page('Ruby', 'Latin America')
         self.engine.page.locator('#remote').evaluate('e=>{e.setAttribute("aria-label","loading");setTimeout(()=>e.setAttribute("aria-label","Filter by Remote"),100)}')
         self.engine.checkbox('Remote', True, configure=False)
         self.assertTrue(self.engine.verified_filters['Remote'])
+
+    def test_filter_variants_have_explicit_state_and_can_be_configured(self):
+        variants = [
+            '<div><input type="checkbox" id="r" style="display:none"><label for="r">Remote</label></div>',
+            '<div role="checkbox" aria-label="Remote" aria-checked="false" onclick="this.setAttribute(\'aria-checked\',\'true\')">Remote</div>',
+            '<div role="switch" aria-label="Filter by Remote" aria-checked="false" onclick="this.setAttribute(\'aria-checked\',\'true\')">Remote</div>',
+            '<button type="button" aria-label="Remote" aria-pressed="false" onclick="this.setAttribute(\'aria-pressed\',\'true\')">Remote</button>',
+        ]
+        for markup in variants:
+            with self.subTest(markup=markup):
+                self.engine.page.set_content('<div class="search-reusables__filters-bar">' + markup + '</div>')
+                self.engine.checkbox('Remote', True)
+                self.engine.checkbox('Remote', True, configure=False)
+                self.assertTrue(self.engine.verified_filters['Remote'])
+
+    def test_filter_missing_ambiguous_or_without_state_fails_closed(self):
+        variants = [
+            '<button>Remote</button>',
+            '<div role="checkbox" aria-label="Remote" aria-checked="mixed">Remote</div>',
+            '<input type="checkbox" aria-label="Remote" checked><input type="checkbox" aria-label="Remote" checked>',
+            '<div style="display:none" componentkey="JobsSearchFilters"><input type="checkbox" aria-label="Remote" checked></div>',
+        ]
+        for markup in variants:
+            with self.subTest(markup=markup):
+                self.engine.page.set_content('<div componentkey="JobsSearchFilters">' + markup + '</div>')
+                with self.assertRaisesRegex(search.SearchUnavailable, 'cannot be verified'):
+                    self.engine.checkbox('Remote', True)
+
+    def test_alternative_filter_reset_is_not_reconfigured_during_verification(self):
+        self.engine.page.set_content('''<div componentkey="JobsSearchFilters">
+            <button aria-label="Remote" aria-pressed="false">Remote</button></div>''')
+        with self.assertRaisesRegex(search.SearchUnavailable, 'changed or ignored'):
+            self.engine.checkbox('Remote', True, configure=False)
+        self.assertEqual(self.engine.page.locator('button').get_attribute('aria-pressed'), 'false')

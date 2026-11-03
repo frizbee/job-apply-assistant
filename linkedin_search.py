@@ -242,12 +242,26 @@ class LinkedInSearch:
             self.wait(250)
 
     def filter_checkbox(self, name):
-        controls = self.page.locator(f'[componentkey="JobsSearchFilters"]:visible input[aria-label="Filter by {name}"]')
+        roots = self.page.locator('[componentkey="JobsSearchFilters"]:visible, .search-reusables__filters-bar:visible, #search-reusables__filters-bar:visible')
+        # Some variants use a labelled (visually hidden) input, others an ARIA
+        # checkbox/switch or a pressed button. Text/URL presence is not state.
+        label = re.compile(r'^(?:Filter by )?' + re.escape(name) + r'$')
+        controls = roots.get_by_role('checkbox', name=label, include_hidden=True).or_(
+            roots.get_by_role('switch', name=label, include_hidden=True)).or_(
+            roots.get_by_role('button', name=label).locator('xpath=self::*[@aria-pressed]'))
         for _ in range(32):
             # evaluate_all tolerates the brief zero-control hydration window;
             # is_checked on a stale locator instead times out mid-navigation.
-            states = controls.evaluate_all('es=>es.map(e=>e.checked)')
-            if len(states) == 1:
+            states = controls.evaluate_all('''es=>es.map(e=>{
+                for(let p=e.parentElement;p;p=p.parentElement) {
+                    const style=getComputedStyle(p);
+                    if(style.display==='none'||style.visibility==='hidden') return null;
+                }
+                if(e.matches('input[type="checkbox"]')) return e.checked;
+                const state=e.getAttribute(e.getAttribute('role')==='button'||e.tagName==='BUTTON'?'aria-pressed':'aria-checked');
+                return state==='true'?true:state==='false'?false:null;
+            })''')
+            if len(states) == 1 and isinstance(states[0], bool):
                 return controls.first, states[0]
             self.wait(250)
         raise SearchUnavailable(f'LinkedIn {name} filter cannot be verified after hydration')
@@ -255,11 +269,18 @@ class LinkedInSearch:
     def checkbox(self, name, expected, *, configure=True):
         if self.page.locator('input[id*="jobs-search-box-location"]').count() and not self.page.locator('[componentkey="JobsSearchFilters"]').count():
             return  # Legacy URL filters remain subject to final job metadata gates.
+        if name == 'Remote':
+            trigger = self.page.locator('[componentkey="JobsSearchFilters"]:visible [role="button"][aria-expanded]').filter(
+                has=self.page.locator('[aria-label="Filter by Workplace Type"], [aria-label="Filter by Remote"]'))
+            if trigger.count():
+                self.workplace(trigger, expected, configure=configure)
+                return
         control, state = self.filter_checkbox(name)
         if state != expected:
             if not configure:
                 raise SearchUnavailable(f'LinkedIn {name} filter was changed or ignored')
-            self.core.click_form_control(control.locator('..').locator('label'))
+            labels = control.locator('xpath=ancestor::label[1] | ../label')
+            self.core.click_form_control(labels if labels.count() == 1 else control)
             for _ in range(20):
                 self.wait(250)
                 control, state = self.filter_checkbox(name)
@@ -268,6 +289,48 @@ class LinkedInSearch:
         if state != expected:
             raise SearchUnavailable(f'LinkedIn {name} filter was not applied')
         self.verified_filters[name] = state
+
+    def workplace(self, trigger, remote_only, *, configure):
+        """Inspect actual dropdown options, not the summary pill's checkbox.
+
+        The native search-results route may discard legacy f_WT. Its Remote
+        summary is also a menu trigger, not a standalone Remote toggle.
+        """
+        if trigger.count() != 1:
+            raise SearchUnavailable('LinkedIn workplace filter cannot be identified uniquely')
+        self.core.click_form_control(trigger)
+        show = self.page.locator('a:visible,button:visible').filter(has_text=re.compile(r'^Show results$'))
+        show.wait_for(state='visible', timeout=8000)
+        panel = show.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]')
+        options = panel.locator('input[type="checkbox"]')
+        names = options.evaluate_all('es=>es.map(e=>e.getAttribute("aria-label"))')
+        if sorted(name or '' for name in names) != ['Hybrid', 'On-site', 'Remote']:
+            self.page.keyboard.press('Escape')
+            raise SearchUnavailable(f'LinkedIn workplace options cannot be verified: {names!r}')
+        expected = {'Remote'} if remote_only else set()
+        changed = False
+        for name in names:
+            control = panel.get_by_role('checkbox', name=name, exact=True, include_hidden=True)
+            if control.is_checked() != (name in expected):
+                if not configure:
+                    self.page.keyboard.press('Escape')
+                    raise SearchUnavailable('LinkedIn Remote filter was changed or ignored')
+                labels = control.locator('..').locator('label')
+                if labels.count() != 1:
+                    raise SearchUnavailable('LinkedIn workplace checkbox label is ambiguous')
+                self.core.click_form_control(labels)
+                changed = True
+        selected = {name for name in names if panel.get_by_role('checkbox', name=name, exact=True, include_hidden=True).is_checked()}
+        if selected != expected:
+            raise SearchUnavailable('LinkedIn Remote selection did not persist')
+        if changed:
+            self.core.click_form_control(show)
+            self.wait(1500)
+            self.checkbox('Remote', remote_only, configure=False)
+        else:
+            self.page.keyboard.press('Escape')
+            self.wait(250)
+            self.verified_filters['Remote'] = remote_only
 
     def verify(self, keyword, location, geo_id):
         params = parse_qs(urlparse(self.page.url).query)
@@ -338,3 +401,42 @@ class LinkedInSearch:
         except Exception as e:
             if not self.core.browser_closed(e):
                 raise
+
+
+class PolicySearch(LinkedInSearch):
+    """Broad discovery; remote/age/geographic eligibility is checked per JD.
+
+    Do not require a working search Remote widget to inspect individual jobs.
+    Keyword and native region identity must still be verified on every page.
+    """
+    def verify(self, keyword, location, geo_id):
+        params = parse_qs(urlparse(self.page.url).query)
+        if params.get('geoId') != [geo_id] or normalized(self.location_label()) != normalized(location):
+            raise SearchUnavailable('Policy search region identity mismatch')
+        if params.get('keywords') != [keyword]:
+            raise SearchUnavailable('Policy search keyword identity mismatch')
+        if params.get('f_TPR') or params.get('f_AL'):
+            raise SearchUnavailable('Policy search unexpectedly retained date/Easy Apply URL restrictions')
+        field = self.page.locator('input[componentkey="semanticSearchBox"], input[id*="jobs-search-box-keyword"]')
+        if field.count() and normalized(field.first.input_value()) != normalized(keyword):
+            raise SearchUnavailable('Policy keyword control mismatch')
+
+    def search_page(self, keyword, location, index=0):
+        if index:
+            return super().search_page(keyword, location, index)
+        original = self.core.search_url(keyword, location)
+        if location not in self.regions:
+            self.navigate(original)
+        geo_id = self.resolve_region(location)
+        self.navigate(native_url(original, geo_id))
+        self.checkbox('Easy Apply', False)
+        self.experience(configure=True)
+        self.current = (keyword, location, geo_id, 0)
+        self.verify(keyword, location, geo_id)
+        result = self.page.evaluate(COLLECT_JS)
+        self.verify(keyword, location, geo_id)
+        self.experience()
+        if not result.get('root_count') or (not result.get('ids') and not result.get('empty_confirmed')):
+            raise SearchUnavailable('Policy search has no verified cards/empty state')
+        self.last = result
+        return result

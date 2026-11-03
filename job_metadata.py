@@ -91,7 +91,7 @@ def workplace_kind(*values) -> str | None:
     return next((k for k in ("hybrid", "onsite", "remote") if k in kinds), None)
 
 
-def eligibility_reason(metadata: dict, hours: float, remote_only: bool = True,
+def eligibility_reason(metadata: dict, hours: float | None, remote_only: bool = True,
                        now: dt.datetime | None = None) -> str | None:
     now = now or dt.datetime.now(UTC)
     workplace = workplace_kind(metadata.get("workplace"))
@@ -102,9 +102,9 @@ def eligibility_reason(metadata: dict, hours: float, remote_only: bool = True,
         age = (now - posted).total_seconds()
         if age < 0:
             return "posting_date_future"
-        if age > hours * 3600:
+        if hours is not None and age > hours * 3600:
             return "posting_too_old"
-    else:
+    elif hours is not None:
         return "posting_date_unknown"
     if remote_only and workplace != "remote":
         return "workplace_unknown"
@@ -146,7 +146,23 @@ DETAILS_JS = r"""() => {
         title = title.split('|').slice(1).join('|').trim();
     const id = location.pathname.match(/\/jobs\/view\/(?:[^/]*-)?(\d+)\/?$/)?.[1];
     const about = id && document.getElementById('JobDetails_AboutTheJob_' + id);
-    const desc = about?.querySelector('[data-testid="expandable-text-box"]') || about || document.querySelector('#job-details, .jobs-description');
+    let desc = about?.querySelector('[data-testid="expandable-text-box"]') || about || document.querySelector('#job-details, .jobs-description');
+    // SDUI now uses an opaque componentkey instead of JobDetails_AboutTheJob_ID.
+    // Require a unique local heading and one description box, never the global
+    // first expandable box (which could be company information/recommendations).
+    if (!desc && id && title && company) {
+        const headings = [...document.querySelectorAll('h2')].filter(e =>
+            /^about (?:the|this) job$/i.test(clean(e.innerText)) &&
+            !e.closest('aside,[componentkey="SearchResultsMainContent"]'));
+        if (headings.length === 1) {
+            let container = headings[0].parentElement;
+            for (let depth = 0; container && depth < 4; depth++, container = container.parentElement) {
+                const boxes = container.querySelectorAll('[data-testid="expandable-text-box"]');
+                if (boxes.length === 1) { desc = boxes[0]; break; }
+                if (boxes.length > 1 || container.matches('main,body')) break;
+            }
+        }
+    }
     return {title, company, description: desc?.innerText || '', roots: roots.length};
 }"""
 
@@ -183,6 +199,7 @@ METADATA_JS = r"""source => {
         labels: source === 'remoteok' ? remoteLabels.map(e => e.getAttribute('data-workplace-type') || e.innerText) : roots.map(e => e.innerText),
         scoped_job_id: remoteRoot ? remoteId : null,
         language: document.documentElement.lang, roots: roots.length,
+        closed: source === 'linkedin' && roots.some(e => /no longer accepting applications|no longer available|job has expired/i.test(e.innerText)),
         times: roots.flatMap(e => [...e.querySelectorAll('time[datetime]')].map(t => t.dateTime))};
 }"""
 
@@ -235,11 +252,13 @@ def page_metadata(page, source: str, expected_url: str, *, attempts: int = 3) ->
     header_location = next((line.split('·')[0].strip() for label in labels for line in label.splitlines()
                             if '·' in line and posting_time(line) is not None), '')
     return {"posted_at": posted,
+            'active': False if raw.get('closed') else None,
             "workplace": workplace_kind(posting.get("jobLocationType"), *labels), "location": location or header_location,
             'title': posting.get('title', ''),
             'company': (posting.get('hiringOrganization') or {}).get('name', '') if isinstance(posting.get('hiringOrganization'), dict) else '',
             'description': posting.get('description', ''),
             'diagnostic': {'language': raw.get('language', ''), 'header_roots': raw.get('roots', len(labels)),
+                           'header_text': '\n'.join(labels)[:5000] if source == 'linkedin' else '',
                            'inspections': inspections,
                             'jsonld_postings': len(raw.get('postings', [])), 'scoped_job_id': raw.get('scoped_job_id'),
                             'date_evidence': [v[:250] for v in dates if isinstance(v, str) and posting_time(v) is not None],

@@ -134,6 +134,8 @@ class BrowserGUIControlTests(SafetyTest):
         self.profile_error = ""
         self.start_error = None
         self.state_extra = {}
+        self.deferred_jobs = []
+        self.review_commands = []
         self.page.on("pageerror", lambda error: self.errors.append(error))
         def respond(route):
             path = route.request.url.split("autoapply.test", 1)[-1]
@@ -145,12 +147,52 @@ class BrowserGUIControlTests(SafetyTest):
                                     "profile_error": self.profile_error, **self.state_extra})
             elif path == "/api/start" and self.start_error:
                 route.fulfill(json=self.start_error)
+            elif path == '/api/deferred':
+                route.fulfill(json={'jobs': self.deferred_jobs})
+            elif path == '/api/review/action':
+                self.review_commands.append(route.request.post_data_json)
+                route.fulfill(json={'ok': True})
             elif path == "/api/quit":
                 self.quit_requests.append(route.request)
                 route.fulfill(json={"ok": True})
             else:
                 route.abort()
         self.context.route("**/*", respond)
+
+    def test_review_panel_is_in_selected_job_card_not_below_all_70_jobs(self):
+        self.deferred_jobs = [{'job_id': str(i), 'title': f'Role {i}', 'company': f'Company {i}',
+                               'reason': 'Review', 'can_assist': True, 'category': 'manual',
+                               'related_job_ids': [str(i)]} for i in range(70)]
+        self.page.goto('http://autoapply.test/')
+        self.page.wait_for_function("document.querySelectorAll('.deferred-job').length === 70")
+        state = {'job_id': '12', 'title': 'Senior Software Engineer', 'company': 'Fleetio',
+                 'test_mode': False, 'phase': 'waiting', 'step': 'one-current-step',
+                 'issues': ['Country* — choose an option from the dropdown list']}
+        self.page.evaluate('state=>showReview(state)', state)
+        self.assertTrue(self.page.locator('#review_panel').is_visible())
+        self.assertEqual(self.page.locator('#review_panel').locator('..').get_attribute('data-job-ids'), '["12"]')
+        self.assertIn('Senior Software Engineer — Fleetio (#12)', self.page.locator('#review_job_title').inner_text())
+        self.assertIn('Country*', self.page.locator('#review_issues').inner_text())
+        self.page.locator('#review_continue').click()
+        self.assertEqual(self.review_commands, [{'action': 'continue', 'step': 'one-current-step'}])
+        self.page.evaluate('refreshDeferred()')
+        self.assertEqual(self.page.locator('#review_panel').count(), 1)
+        self.assertTrue(self.page.locator('#review_panel').is_visible())
+        self.assertEqual(self.page.locator('#review_panel').locator('..').get_attribute('data-job-ids'), '["12"]')
+        self.assertEqual(self.errors, [])
+
+    def test_review_without_queue_owner_stays_at_top_with_identity_and_safe_text(self):
+        self.page.goto('http://autoapply.test/')
+        self.page.wait_for_function("document.getElementById('english').value === '3'")
+        self.page.evaluate('''()=>showReview({job_id:'123',title:'<img src=x onerror=alert(1)>',company:'Example',
+            test_mode:true,phase:'waiting',step:'current',issues:['Resume*']})''')
+        self.assertTrue(self.page.locator('#review_panel').is_visible())
+        self.assertIn('<img src=x', self.page.locator('#review_job_title').inner_text())
+        self.assertEqual(self.page.locator('#review_job_title img').count(), 0)
+        self.assertTrue(self.page.evaluate("document.getElementById('review_panel').nextElementSibling.id === 'deferred_jobs'"))
+        self.page.evaluate("()=>showReview({job_id:'123',test_mode:true,phase:'finished',result:'manual_review',issues:[]})")
+        self.assertTrue(self.page.locator('#review_continue').is_disabled())
+        self.assertTrue(self.page.locator('#review_skip').is_disabled())
 
     def test_switch_then_quit_uses_real_handlers(self):
         self.page.goto("http://autoapply.test/")

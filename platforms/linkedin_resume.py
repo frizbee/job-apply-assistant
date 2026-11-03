@@ -46,10 +46,27 @@ def verified_group(group, core):
         digest = digest_for(core, resume)
         root = group.locator(RESUME_ROOT)
         return (root.count() == 1 and root.get_attribute(PROOF) == digest and selected(root, resume.name)
-                and group.locator('input[type=radio]').count() == root.locator('input[type=radio]').count()
-                and group.locator('[role=radio]').count() == root.locator('[role=radio]').count()
-                and group.locator('input[type=radio]:checked').count() == 1
-                and group.locator('[role=radio][aria-checked=true]').count() == root.locator('[role=radio]').count())
+                and group.evaluate(r'''group => {
+                    const root=group.querySelector('[componentkey="easyApplyUploadedResumeRef"]');
+                    const uploaded=root.querySelector('input[type=radio]');
+                    const native=[...group.querySelectorAll('input[type=radio]')];
+                    const roles=[...group.querySelectorAll('[role=radio]')];
+                    const filename=name=>/\.(pdf|docx?)$/i.test(name||'');
+                    // LinkedIn retains older resume cards next to the fresh upload.
+                    // They must be unselected members of the SAME document group,
+                    // not an unrelated screening question exempted from validation.
+                    for(const input of native.filter(e=>!root.contains(e))) {
+                        const wrapper=input.closest('[role=radio]');
+                        const label=input.getAttribute('aria-label')||wrapper?.getAttribute('aria-label');
+                        if(!uploaded.name||input.name!==uploaded.name||input.checked||!filename(label)) return false;
+                        if(input.hasAttribute('aria-checked')&&input.getAttribute('aria-checked')!=='false') return false;
+                    }
+                    for(const role of roles.filter(e=>!root.contains(e))) {
+                        const backing=role.matches('input[type=radio]')?[role]:[...role.querySelectorAll('input[type=radio]')];
+                        if(role.getAttribute('aria-checked')!=='false'||!filename(role.getAttribute('aria-label'))||backing.length!==1) return false;
+                    }
+                    return native.filter(e=>e.checked).length===1;
+                }'''))
     except (OSError, KeyError, ValueError):
         return False
 

@@ -58,6 +58,12 @@ class ConfirmationTests(SafetyTest):
             self.assertEqual(apply.wait_linkedin_submission(self.page, self.modal, set(), 0,
                              expected_url="https://www.linkedin.com/jobs/view/456/"), "submission_unconfirmed")
 
+    def test_tracking_query_change_does_not_hide_same_job_confirmation(self):
+        self.page.url = 'https://www.linkedin.com/jobs/view/123/?trackingId=changed'
+        with patch.object(apply, 'linkedin_submission_signals', return_value={'application sent'}):
+            self.assertEqual(apply.wait_linkedin_submission(self.page, self.modal, set(), 0,
+                             expected_url='https://www.linkedin.com/jobs/view/123/'), 'applied')
+
 
 class PersistenceTests(SafetyTest):
     def setUp(self):
@@ -195,6 +201,44 @@ class BrowserConfirmationTests(SafetyTest):
     def test_visible_validation_error_is_not_success(self):
         self.modal.evaluate("e => e.innerHTML = '<input aria-invalid=\"true\"><p role=\"alert\">Required</p>'")
         self.assertEqual(apply.wait_linkedin_submission(self.page, self.modal, set(), 0), "submission_rejected")
+
+    def load_submitted_card(self, body, url='https://www.linkedin.com/jobs/view/123/'):
+        self.context.unroute('**/*')
+        self.context.route('**/*', lambda route: route.fulfill(content_type='text/html', body=body))
+        self.page.goto(url)
+
+    def test_persistent_sdui_card_confirms_submission_without_a_toast(self):
+        self.load_submitted_card('<div><p>Application submitted</p><p>1 hour ago</p><p><a href="https://www.linkedin.com/ambry/?receipt=1">View resume</a></p></div>')
+        signals = apply.linkedin_submission_signals(self.page)
+        self.assertEqual(signals, {'application submitted'})
+        self.assertEqual(apply.wait_linkedin_submission(self.page, self.modal, set(), 0,
+                         expected_url=self.page.url), 'applied')
+        self.assertEqual(apply.wait_linkedin_submission(self.page, self.modal, signals, 0), 'submission_unconfirmed')
+
+    def test_description_recommendation_or_untrusted_receipt_does_not_confirm(self):
+        card = '<div><p>Application submitted</p><a href="https://www.linkedin.com/ambry/">View resume</a></div>'
+        for body in ['<div id="JobDetails_AboutTheJob_123">'+card+'</div>', '<aside>'+card+'</aside>',
+                     card.replace('www.linkedin.com', 'evil.example'), card.replace('View resume', 'Learn more'),
+                     '<div style="display:none">'+card+'</div>']:
+            with self.subTest(body=body):
+                self.load_submitted_card(body)
+                self.assertEqual(apply.linkedin_submission_signals(self.page), set())
+
+    def test_submitted_card_on_non_job_url_is_not_a_confirmation(self):
+        self.load_submitted_card('<div><p>Application submitted</p><a href="https://www.linkedin.com/ambry/">View resume</a></div>',
+                                 'https://www.linkedin.com/feed/')
+        self.assertEqual(apply.linkedin_submission_signals(self.page), set())
+
+    def test_immediate_status_card_without_resume_receipt_confirms_submission(self):
+        card = '<section><div><h2>Application status</h2></div><div><div><p>Application submitted</p><p>now</p></div></div></section>'
+        self.load_submitted_card(card)
+        self.assertEqual(apply.linkedin_submission_signals(self.page), {'application submitted'})
+        for body in ['<div id="JobDetails_AboutTheJob_123">'+card+'</div>',
+                     card.replace('Application status', 'About the job'),
+                     card.replace('<h2>', '<h2 style="display:none">')]:
+            with self.subTest(body=body):
+                self.load_submitted_card(body)
+                self.assertEqual(apply.linkedin_submission_signals(self.page), set())
 
 
 if __name__ == "__main__":

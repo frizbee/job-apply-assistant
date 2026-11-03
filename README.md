@@ -82,6 +82,24 @@ The app remembers it. To use a different key later, click **Change key** in step
 
 ## Good to know
 
+### Project-owner policy (AGENTS.md)
+
+This checkout enables `application_policy.enabled: true`: the root CV, the nine
+approved Ruby/backend/lead search titles, all non-Asian discovery regions,
+full available pagination, no posting-age cutoff, and **70% evidence-backed JD
+assessment**. It overrides legacy GUI/config search filters at run start. Easy
+Apply is a routing choice, not an eligibility requirement. Candidates, blockers
+and restart cursors are saved privately in `data/candidates.json`; submission
+history and duplicate protection remain in place. Missing model access leaves a
+job pending for manual evidence assessment, never rejected by keyword count.
+Automatic assessment sends the full JD and CV to the configured free OpenRouter
+adapter; quote validation does not guarantee correct semantic judgments.
+
+See [policy, queue, assessment and assisted-browser instructions (Russian)](docs/application-policy.ru.md).
+The generic defaults described below apply when the project-owner policy is disabled.
+
+- **CV assessment:** the former literal technical-coverage score is retired. New scores require source-quoted JD/CV evidence; one meaningful requirement can be assessed without a three-technology minimum. Root-CV binding, the 70% threshold and persistent candidate workflow are documented above. Unknown/unreviewed answers still require user input before sending.
+
 - Only remote jobs posted in the last 7 days are considered. The same job is never applied to twice, even if it appears on several sites.
 - Date and workplace checks apply to every source, including LinkedIn recommendations. Missing, invalid or ambiguous metadata goes to `manual_apply.csv` as `metadata_manual`; old, hybrid and on-site jobs are skipped. Search filters and a remote board's name alone are not evidence. Relative dates are interpreted conservatively, so borderline jobs may be skipped. Explicit geographic restrictions use your configured accepted-region policy; this does not establish legal work authorization.
 - Remote OK detail metadata is scoped to the exact job row/ID/URL. Its local title corroborates anonymous JobPosting JSON-LD, including `TELECOMMUTE`, without treating the board name or a global “Remote …” heading as evidence. See the [fix and live metadata checks (Russian)](docs/remoteok-metadata.ru.md).
@@ -89,7 +107,7 @@ The app remembers it. To use a different key later, click **Change key** in step
 - Himalayas may allow its public jobs API while challenging browser job pages. A failed metadata-page verification now stops that source instead of navigating through every remaining job. API `applicationLink` values are not replaced to evade the challenge; live form readiness remains unverified. See the [challenge behavior and tests (Russian)](docs/himalayas-challenge.ru.md).
 - Company websites are visited only a few times per run, slowly, so you don't get flagged as spam.
 - The run and per-source application limits cap final Submit attempts, not just confirmed successes. Uncertain results, click timeouts and validation rejections consume a slot; only a definitely uninvoked click can release its reservation. ATS attempts count against the originating board. Test mode caps previews instead, without sending or recording applications. Budgets reset each run; the final log reports attempts separately from successes.
-- The external-form attempt quota resets on each run. Any remaining cooldown between attempts is preserved across runs in the same app process, including after stopping a run.
+- The separate external-form quota counts only confirmed LIVE submissions (`applied_external`), with a default of 20 per run. Opening/filling forms, manual review, previews, errors and uncertain/rejected submissions do not consume this quota. The global and per-source Submit-attempt caps above still apply, including to uncertain outcomes. Any remaining cooldown between form openings is preserved across runs in the same app process, including after stopping a run; the confirmed-send count resets each run.
 - Only one GUI run or CV-changing operation can be active at a time. Repeated Start requests cannot change an accepted run's settings or mode; uploads and CV analysis are blocked while it runs. Stop also cancels a run whose worker has not started yet. This reservation is local to one app process, not a multi-process lock.
 - Cached profiles are bound to the CV's SHA-256 contents. Replacing the file clears the old profile and review fields; unchanged contents can keep the cache even under a new filename. Stale tabs cannot start with an old CV identity, and changes during analysis or before the worker starts are rejected. Reanalyze or enter and check a new profile after replacement. Do not modify the CV file externally while the bot is running; it is not an immutable file snapshot.
 - Unknown answers are not guessed. Forms with unresolved questions go to `manual_apply.csv` without being submitted (including in test mode). This is conservative: even an unknown optional question may require manual review. Prefilled text must match a known answer; conflicting/unknown values are not silently overwritten. Text values are checked again after filling/uploads before advancing or submitting, including readonly fields; disabled fields are excluded.

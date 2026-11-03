@@ -37,8 +37,11 @@ class PlatformIsolationTests(unittest.TestCase):
                        # tests/test_indeed_search_resume.py covers its new policy.
                        'indeed_wait_ready': '19644631379d6f16f9cf5d2fece201b7cd45233a0e28a7b40f247752bf770cb2'},
             'linkedin': {'apply_to_job': 'f56d6b656804ced550e62064238da41bf3060b0a18cb912ef0f4ba948dce27e2',
-                         'run_linkedin': '707100656c3b36e5784143c4e6e84fcaf399ecdf05d32c7fc85865a80c52270b',
-                         'job_lists': '4bbd2d14dbb179e951ceee3596a3fe50b3ef55e87bd1560508e7083c789442a4'},
+                         # AGENTS.md policy separates discovery from Submit quotas
+                         # and delegates persistent all-page discovery. Generic
+                         # behavior remains covered by test_linkedin_search.py.
+                         'run_linkedin': '5b58c3c7726a4cdca3f5cbc0e835e6cfff4b10f6431adc2ddcfd1cd5f57276b2',
+                         'job_lists': 'c925b5e529e9710591f157293243458f806dd2f66bb75896b47589c87a6a905c'},
         }
         root = Path(__file__).resolve().parents[1]
         for platform, hashes in expected.items():

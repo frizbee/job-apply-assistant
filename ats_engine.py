@@ -142,7 +142,7 @@ class ATSEngine(PlatformAdapter):
         return (self.core.ats_adapter(name, self.core).application_url(url), name)
 
     def apply_form(self, page: Page, job_id: str, title: str, company: str, url: str, applied: dict | None=None) -> str:
-        """Process a company-site form with a per-run quota and inter-attempt cooldown."""
+        """Limit confirmed external submissions, retaining inter-form cooldowns."""
         ext = self.core.CFG['external']
         if not self.core.EXTERNAL:
             self.core.record_manual(job_id, title, company, url, 'external_disabled')
@@ -160,7 +160,7 @@ class ATSEngine(PlatformAdapter):
         if denied:
             ledger.abandon(identity, job_id)
             return denied
-        if self.core.EXT_STATE['count'] >= ext.get('max_per_run', 5):
+        if self.core.EXT_STATE['count'] >= ext.get('max_per_run', 20):
             ledger.abandon(identity, job_id)
             return 'skipped_external_limit'
         form_url, ats = self.core.ats_apply_url(page, url)
@@ -180,7 +180,6 @@ class ATSEngine(PlatformAdapter):
         if wait > 0:
             self.core.log(f'  .. waiting {int(wait)} seconds before the next company form')
             self.core.pause(wait, wait)
-        self.core.EXT_STATE['count'] += 1
         self.core.EXT_STATE['last'] = time.time()
         self.core.log(f'  -> {ats}: {form_url[:90]}')
         result = 'pre_submission_error'
@@ -190,6 +189,8 @@ class ATSEngine(PlatformAdapter):
             if identity and self.core.application_identity.application_key(page.url, self.core) != identity:
                 raise self.core.UntrustedApplicationSite('ats_job_identity_changed')
             result = self.core.ats_adapter(ats, core).apply(page, job_id, title, company, form_url, history)
+            if result == 'applied_external' and not self.core.DRY_RUN:
+                self.core.EXT_STATE['count'] += 1
             return result
         except (self.core.UntrustedApplicationSite, self.core.UnsafeFormControl) as e:
             self.core.log(f'  ! unsafe application site/action: {e}')

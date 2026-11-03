@@ -368,7 +368,9 @@ class BrowserLinkedinLayoutTests(SafetyTest):
             <input id="years" type="number" required><footer><button type="submit">Submit application</button></footer></form></div>'''
         apply.SETTINGS['relevance_profile'] = 'rails_backend'
         apply.CFG['skill_years'] = {'ruby': 14}
-        with patch.object(apply, 'DRY_RUN', True):
+        # This local fixture tests form mechanics, not network/CV assessment;
+        # semantic source-evidence scoring has dedicated offline tests.
+        with patch.object(apply, 'DRY_RUN', True), patch.object(apply, 'check_resume_match', return_value=True):
             self.assertTrue(apply.process_job(self.page, {}, '123'))
         self.assertEqual(self.page.locator('#years').input_value(), '14')
         self.assertEqual(self.page.evaluate('window.sent'), 0)

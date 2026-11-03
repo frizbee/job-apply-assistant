@@ -37,6 +37,7 @@ class Utf8PersistenceTests(SafetyTest):
 import json, locale, os, sys
 from pathlib import Path
 import apply, cv_profile
+apply.CFG['application_policy']['enabled'] = False  # Generic arbitrary-CV UTF-8 roundtrip.
 assert sys.flags.utf8_mode == 0
 if os.name != 'nt':
     assert locale.getencoding().lower() in ('ascii', 'us-ascii', 'ansi_x3.4-1968')

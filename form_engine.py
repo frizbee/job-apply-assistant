@@ -10,6 +10,8 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus, urlparse
 from playwright.sync_api import Page, Locator
 from platforms.base import PlatformAdapter
+from platforms import linkedin_location
+from form_validation import NATIVE_FORM_DIAGNOSTICS_JS
 
 QUESTION_JS = r"""el => {
   const t = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -503,6 +505,8 @@ class FormEngine(PlatformAdapter):
         kind = self.core.application_answers.contact_kind(q)
         if kind and (not external):
             return self.core.answer(q)
+        if not external and linkedin_location.city_field(el, q):
+            return [self.core.PROFILE['city']] if self.core.PROFILE.get('city') else []
         std = self.core.standard_answer(el, q) if external else None
         if std:
             return [std]
@@ -532,6 +536,10 @@ class FormEngine(PlatformAdapter):
                 continue
             q = self.core.question_of(el)
             candidates = self.core.text_field_candidates(el, q, external=external)
+            if not external and linkedin_location.autocomplete(el, q):
+                if not linkedin_location.confirmed(el, self.core):
+                    issues.append(q or 'city selection')
+                continue
             if external and el.get_attribute('role') == 'combobox':
                 confirmed = self.core.combobox_value_confirmed(el, q, candidates)
             else:
@@ -582,6 +590,10 @@ class FormEngine(PlatformAdapter):
                     raise self.core.ApplicationFormChanged('application_field_question_changed')
                 cands = self.core.text_field_candidates(el, q, external=external)
                 numeric = el.get_attribute('type') == 'number'
+                if not external and linkedin_location.autocomplete(el, q):
+                    if not linkedin_location.fill(el, cands, self.core):
+                        unanswered.append(q or 'city selection')
+                    continue
                 if external and el.get_attribute('role') == 'combobox':
                     if not self.core.combobox_value_confirmed(el, q, cands) and (not self.core.fill_combobox(page, el, q)):
                         unanswered.append(q)
@@ -694,5 +706,5 @@ class FormEngine(PlatformAdapter):
 
     def native_form_issues(self, form: Locator) -> list[str]:
         """Native/ARIA validity still applies to user-assisted, explicitly reviewed steps."""
-        issues = form.locator("input, textarea, select, [aria-required='true']:visible").evaluate_all('els => els.filter(e => {\n            if (e.disabled || e.readOnly || e.type === \'hidden\') return false;\n            if (e.validity && !e.validity.valid) return true;\n            if (e.getAttribute(\'aria-invalid\') === \'true\') return true;\n            if (e.getAttribute(\'aria-required\') !== \'true\') return false;\n            if (e.type === \'checkbox\' || e.type === \'radio\') return !e.checked;\n            if (e.type === \'file\') return !e.files.length;\n            if (e.getAttribute(\'role\') === \'radiogroup\')\n                return !e.querySelector(\'[aria-checked="true"], input:checked\');\n            if (\'value\' in e) return !e.value.trim();\n            return !e.getAttribute(\'aria-valuetext\');\n        }).map(e => e.getAttribute(\'aria-label\') || e.name || e.id || \'invalid required field\')')
-        return issues
+        diagnostics = form.locator("input, textarea, select, [aria-required='true']").evaluate_all(NATIVE_FORM_DIAGNOSTICS_JS)
+        return list(dict.fromkeys(issue['message'] for issue in diagnostics))

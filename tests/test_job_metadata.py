@@ -98,6 +98,7 @@ class GateTests(SafetyTest):
                 (1, "hybrid", True, False), (1, "onsite", True, False), (1, None, True, False), (1, "remote", False, False)]:
             with self.subTest(days=days, workplace=workplace, known_date=known_date):
                 with patch.object(apply, "job_info", return_value=("Engineer", "Example", "")), \
+                        patch.object(apply, "check_resume_match", return_value=True), \
                         patch.object(apply, "read_job_metadata", return_value=self.job_with(days, workplace, known_date)["metadata"]), \
                         patch.object(apply, "apply_to_job", return_value="applied") as send:
                     self.assertEqual(apply.process_job(node(), {}, "123"), allowed)
@@ -195,6 +196,26 @@ class BrowserMetadataTests(SafetyTest):
         result = metadata.page_metadata(self.page, "wellfound", url)
         self.assertEqual(result["posted_at"], NOW)
         self.assertEqual(result["workplace"], "hybrid")
+
+    def test_linkedin_opaque_about_component_reads_only_job_description(self):
+        self.html = '''<title>Engineer | Example | LinkedIn</title>
+            <div class="job-details-jobs-unified-top-card"><h1>Engineer</h1>
+            <a href="/company/example/">Example</a></div>
+            <div componentkey="opaque-uuid"><div><div><h2>About the job</h2></div>
+            <p><span data-testid="expandable-text-box">Ruby PostgreSQL Redis</span></p></div></div>
+            <aside><span data-testid="expandable-text-box">Python recommendation</span></aside>'''
+        self.page.goto('https://www.linkedin.com/jobs/view/123/')
+        result = self.page.evaluate(metadata.DETAILS_JS)
+        self.assertEqual(result['description'], 'Ruby PostgreSQL Redis')
+
+    def test_linkedin_ambiguous_about_headings_fail_closed(self):
+        self.html = '''<title>Engineer | Example | LinkedIn</title>
+            <div class="job-details-jobs-unified-top-card"><h1>Engineer</h1>
+            <a href="/company/example/">Example</a></div>
+            <div><h2>About the job</h2><span data-testid="expandable-text-box">Ruby</span></div>
+            <div><h2>About the job</h2><span data-testid="expandable-text-box">Python</span></div>'''
+        self.page.goto('https://www.linkedin.com/jobs/view/123/')
+        self.assertEqual(self.page.evaluate(metadata.DETAILS_JS)['description'], '')
 
     def test_linkedin_header_metadata_ignores_remote_description_and_recommendations(self):
         url = "https://www.linkedin.com/jobs/view/123/"

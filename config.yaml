@@ -32,8 +32,15 @@ llm:
       max_output_tokens: 4096
       timeout_seconds: 180
 
+# AGENTS.md policy overrides legacy GUI/search filters at run start. It always
+# uses the root CV, nine approved titles, all non-Asian regions, full pagination,
+# no posting-age cutoff and external application routing. Disable explicitly to
+# return to the generic multi-user GUI defaults below.
+application_policy:
+  enabled: true
+
 search:
-  # Job titles from the GUI/reviewed CV override these defaults.
+  # Legacy defaults below apply only when application_policy.enabled is false.
   keywords:
     - "Software Engineer"
   locations:
@@ -44,6 +51,11 @@ search:
   posted_within_hours: 168     # Jobs posted in the last week.
   experience_levels: [2, 3, 4] # 2=Entry 3=Associate 4=Mid-Senior 5=Director
   pages_per_search: 2          # Pages per search (25 jobs/page).
+
+# Evidence-backed full-JD assessment; no keyword percentage fallback.
+resume_match:
+  enabled: true
+  minimum_percent: 70
 
 filters:
   # Job titles must match at least one pattern (lowercase regex).
@@ -79,10 +91,10 @@ sources:
   weworkremotely: true
 
 # Approved company forms (Greenhouse, Lever, Ashby); other sites are recorded
-# in data/manual_apply.csv. Limit attempts and leave time between them.
+# in data/manual_apply.csv. Limit confirmed sends and leave time between forms.
 external:
   enabled: true
-  max_per_run: 5            # Maximum company forms per run.
+  max_per_run: 20           # Confirmed external submissions per run; not form openings/previews.
   min_wait_seconds: 180     # Cooldown between company forms.
 
 limits:

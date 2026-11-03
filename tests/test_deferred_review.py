@@ -55,6 +55,13 @@ class QueueTests(SafetyTest):
         self.assertEqual(session.action('continue', 'step'), {'ok': True})
         self.assertIn('error', session.action('continue', 'step'))
 
+    def test_public_review_state_identifies_exactly_one_job_without_answers(self):
+        session = review.Session('123', False, title='Engineer', company='Example', job_url='https://www.linkedin.com/jobs/view/123/')
+        state = session.public()
+        self.assertEqual((state['job_id'], state['title'], state['company']), ('123', 'Engineer', 'Example'))
+        self.assertEqual(state['job_url'], 'https://www.linkedin.com/jobs/view/123/')
+        self.assertEqual(state['issues'], [])
+
     def test_bulk_manual_review_does_not_wait_for_user(self):
         with patch.object(apply, 'record_manual'), patch.object(review.Session, 'wait') as wait:
             self.assertTrue(apply.require_manual_review(node(), node(), ['Unknown question'], '123', 'Engineer', 'Example'))
@@ -186,6 +193,53 @@ class BrowserReviewTests(SafetyTest):
         self.command_on_tick(session, action)
         self.assertFalse(session.wait(apply, self.page, self.form, ['Unknown question*']))
         self.assertNotEqual(calls[0]['step'], calls[1]['step'])
+
+    def test_hidden_captcha_enclave_frames_do_not_block_a_completed_step(self):
+        self.ctx.route('**/*captcha*', lambda route: route.fulfill(content_type='text/html', body='<html></html>'))
+        self.form.locator('#answer').fill('My reviewed answer')
+        self.form.evaluate('''e=>e.insertAdjacentHTML('beforeend',
+            '<iframe src="https://newassets.hcaptcha.com/challenge" title="Widget containing checkbox for hCaptcha security challenge" style="position:fixed;width:100%;height:100%;visibility:hidden"></iframe>'+
+            '<div style="display:none"><iframe src="https://www.google.com/recaptcha/challenge" title="recaptcha challenge"></iframe></div>')''')
+        self.assertEqual(self.page.locator(apply.CAPTCHA_SEL).count(), 0)
+        session = review.Session('123', False)
+        self.command_on_tick(session, lambda: session.action('continue', session.public()['step']))
+        self.assertTrue(session.wait(apply, self.page, self.form, ['Check completed answers']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_manual_continue_accepts_one_checked_select_all_choice(self):
+        self.form.locator('#answer').fill('My reviewed answer')
+        self.form.evaluate('''e=>e.insertAdjacentHTML('beforeend',
+            '<fieldset aria-required="true"><legend>How did you hear? (select all that apply)</legend>'+
+            '<label><input type="checkbox" name="sources[]" required checked>LinkedIn</label>'+
+            '<label><input type="checkbox" name="sources[]" required>Indeed</label></fieldset>')''')
+        session = review.Session('123', False)
+        self.command_on_tick(session, lambda: session.action('continue', session.public()['step']))
+        self.assertTrue(session.wait(apply, self.page, self.form, ['Check selected sources']))
+        self.assertEqual(self.form.locator('input[type=checkbox]').evaluate_all('es=>es.map(e=>e.checked)'), [True, False])
+
+    def test_visible_captcha_still_blocks_manual_continuation(self):
+        self.ctx.route('**/*captcha*', lambda route: route.fulfill(content_type='text/html', body='<html></html>'))
+        for provider in ['hcaptcha', 'recaptcha']:
+            with self.subTest(provider=provider):
+                self.form.locator('#answer').fill('My reviewed answer')
+                self.form.locator('iframe').evaluate_all('es=>es.forEach(e=>e.remove())')
+                self.form.evaluate('''(e,provider)=>{
+                    const frame=document.createElement('iframe');frame.src='https://'+provider+'.example/challenge';
+                    frame.title=provider+' security challenge';e.append(frame);
+                }''', provider)
+                session = review.Session('123', False)
+                states = []
+                def action():
+                    current = session.public()
+                    states.append(current)
+                    session.action('continue' if len(states) == 1 else 'skip', current['step'])
+                original = self.page.wait_for_timeout
+                def tick(ms):
+                    action()
+                    original(1)
+                with patch.object(self.page, 'wait_for_timeout', side_effect=tick):
+                    self.assertFalse(session.wait(apply, self.page, self.form, ['Check completed answers']))
+                self.assertIn('Complete the site verification in the browser', states[1]['issues'])
 
     def test_navigation_invalidates_pending_confirmation_even_on_same_host(self):
         session = review.Session('123', True)

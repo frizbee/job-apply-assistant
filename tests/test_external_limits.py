@@ -1,4 +1,4 @@
-"""Per-run external quotas with a process-wide inter-attempt cooldown."""
+"""Confirmed-send external quotas with a process-wide inter-form cooldown."""
 import threading
 from unittest.mock import MagicMock, call, patch
 
@@ -14,6 +14,7 @@ class ExternalLimitTests(SafetyTest):
         self.enterContext(patch.object(apply, "STOP", threading.Event()))
         self.enterContext(patch.object(apply, "DEADLINE", 0.0))
         self.enterContext(patch.object(apply, "EXTERNAL", True))
+        self.enterContext(patch.object(apply, "DRY_RUN", False))
         self.enterContext(patch.object(apply.time, "time", return_value=1000.0))
         self.enterContext(patch.object(apply, "load_applied", return_value={}))
         self.enterContext(patch.object(apply, "LAST_RUN_FILE", MagicMock()))
@@ -36,6 +37,7 @@ class ExternalLimitTests(SafetyTest):
         return 0
 
     def test_two_runs_each_receive_full_quota_and_enforce_it_within_run(self):
+        self.form.return_value = 'applied_external'
         results = []
         def work(*args):
             results.append([self.attempt() for _ in range(3)])
@@ -43,7 +45,7 @@ class ExternalLimitTests(SafetyTest):
         with patch.object(sources, "run", side_effect=work):
             self.assertEqual(apply.run_bot(), 0)
             self.assertEqual(apply.run_bot(), 0)
-        self.assertEqual(results, [["dry_run", "dry_run", "skipped_external_limit"]] * 2)
+        self.assertEqual(results, [["applied_external", "applied_external", "skipped_external_limit"]] * 2)
         self.assertEqual(self.form.call_count, 4)
         self.assertEqual(apply.EXT_STATE["count"], 2)
 
@@ -90,6 +92,7 @@ class ExternalLimitTests(SafetyTest):
         self.assertEqual(self.form.call_count, 1)
 
     def test_aborted_run_does_not_leave_consumed_quota_in_next_run(self):
+        self.form.return_value = 'applied_external'
         def abort(*args):
             self.attempt()
             raise RuntimeError("source failed")
@@ -101,6 +104,36 @@ class ExternalLimitTests(SafetyTest):
             self.assertEqual(apply.run_bot(), 0)
         self.assertEqual(apply.EXT_STATE["count"], 1)
         self.assertEqual(self.form.call_count, 2)
+
+    def test_only_confirmed_live_submissions_consume_the_external_quota(self):
+        apply.EXT_STATE['count'] = 0
+        for result in ['manual_review', 'external_manual', 'dry_run', 'submission_unconfirmed',
+                       'submission_rejected', 'pre_submission_error']:
+            with self.subTest(result=result):
+                self.form.return_value = result
+                self.assertEqual(self.attempt(), result)
+                self.assertEqual(apply.EXT_STATE['count'], 0)
+                self.assertEqual(apply.EXT_STATE['last'], 1000.0)
+        self.form.return_value = 'applied_external'
+        self.assertEqual(self.attempt(), 'applied_external')
+        self.assertEqual(apply.EXT_STATE['count'], 1)
+        self.assertEqual(self.attempt(), 'applied_external')
+        self.assertEqual(apply.EXT_STATE['count'], 2)
+        self.assertEqual(self.attempt(), 'skipped_external_limit')
+
+    def test_test_mode_never_consumes_confirmed_send_quota(self):
+        apply.EXT_STATE['count'] = 0
+        self.form.return_value = 'applied_external'
+        with patch.object(apply, 'DRY_RUN', True):
+            self.assertEqual(self.attempt(), 'applied_external')
+        self.assertEqual(apply.EXT_STATE['count'], 0)
+
+    def test_navigation_failure_keeps_cooldown_but_does_not_consume_quota(self):
+        apply.EXT_STATE['count'] = 0
+        self.page.goto.side_effect = RuntimeError('navigation failed')
+        with self.assertRaisesRegex(RuntimeError, 'navigation failed'):
+            self.attempt()
+        self.assertEqual(apply.EXT_STATE, {'count': 0, 'last': 1000.0})
 
     def test_zero_quota_remains_disabled_after_restart(self):
         apply.CFG["external"]["max_per_run"] = 0

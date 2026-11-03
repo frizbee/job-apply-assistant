@@ -53,7 +53,7 @@ class PlatformIdentityTests(SafetyTest):
             self.assertEqual(apply.apply_form(self.page, '1', 'Engineer', 'Kraken', ASHBY, self.history), 'manual_review')
         fill.assert_called_once()
         self.assertEqual(self.page.goto.call_count, 1)
-        self.assertEqual(apply.EXT_STATE['count'], 1)
+        self.assertEqual(apply.EXT_STATE['count'], 0)
 
     def test_binding_survives_restart_without_migrating_old_records(self):
         with patch.object(apply, 'apply_trusted_form', return_value='manual_review'):
@@ -65,6 +65,14 @@ class PlatformIdentityTests(SafetyTest):
         with patch.object(apply, 'apply_trusted_form') as fill:
             self.assertEqual(apply.apply_form(self.page, '2', 'Engineer', 'Kraken', ASHBY, saved), 'external_duplicate')
         fill.assert_not_called()
+
+    def test_confirmed_external_send_counts_once_even_when_another_board_repeats_it(self):
+        with patch.object(apply, 'DRY_RUN', False), patch.object(apply, 'apply_trusted_form', return_value='applied_external') as fill:
+            self.assertEqual(apply.apply_form(self.page, '1', 'Engineer', 'Kraken', ASHBY, self.history), 'applied_external')
+            self.assertEqual(apply.EXT_STATE['count'], 1)
+            self.assertEqual(apply.apply_form(self.page, '2', 'Engineer', 'Kraken', ASHBY, self.history), 'external_duplicate')
+            self.assertEqual(apply.EXT_STATE['count'], 1)
+        fill.assert_called_once()
 
     def test_old_csv_urls_are_read_without_rewriting_history(self):
         self.history = {'old': {'status': 'manual_review', 'url': 'https://www.linkedin.com/jobs/view/1/'}}
@@ -92,11 +100,13 @@ class PlatformIdentityTests(SafetyTest):
                 pending = json.loads(apply.APPLIED_FILE.read_text(encoding='utf-8'))['1']
                 self.assertEqual(pending['status'], 'submission_pending')
                 self.assertEqual(pending['application_key'], self.key(ASHBY))
+                self.assertEqual(apply.EXT_STATE['count'], 0)
             button.click.side_effect = click
             def fill(page, job_id, title, company, url, provider, history):
                 return apply.submit_application(page, button, job_id, title, company, url, lambda: 'applied_external', history)
             with patch.object(apply, 'apply_trusted_form', side_effect=fill):
                 self.assertEqual(apply.apply_form(self.page, '1', 'Engineer', 'Kraken', ASHBY, self.history), 'applied_external')
+            self.assertEqual(apply.EXT_STATE['count'], 1)
             button.click.assert_called_once()
             identity.reset(apply)
             duplicate = node()

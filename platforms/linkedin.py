@@ -15,13 +15,42 @@ class LinkedInAdapter(PlatformAdapter):
     def linkedin_submission_signals(self, page: Page) -> set[str]:
         """Explicit confirmation lines only, not generic 'thanks' or job descriptions."""
         texts = page.locator("dialog[open]:visible, [role='dialog']:visible, .artdeco-toast-item:visible, [role='status']:visible").all_inner_texts()
-        return {line.strip().casefold() for text in texts for line in text.splitlines() if self.core.LINKEDIN_SENT_RE.fullmatch(line.strip())}
+        signals = {line.strip().casefold() for text in texts for line in text.splitlines() if self.core.LINKEDIN_SENT_RE.fullmatch(line.strip())}
+        # SDUI replaces the Apply button with a persistent submitted card; it is
+        # not a toast, dialog or ARIA status. Require the native status-card
+        # heading or attached resume receipt; never match arbitrary page text.
+        submitted_card = page.evaluate(r'''() => {
+            if(location.protocol!=='https:'||location.hostname!=='www.linkedin.com'||!/^\/jobs\/view\/\d+\/?$/.test(location.pathname)) return false;
+            const visible=e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden';
+            return [...document.querySelectorAll('p')].some(e=>{
+                if(e.textContent.trim()!=='Application submitted'||!visible(e)) return false;
+                if(e.closest('[id^="JobDetails_AboutTheJob_"],.jobs-description,#job-details,[componentkey="SearchResultsMainContent"],aside')) return false;
+                const receipt=[...e.parentElement.querySelectorAll('a')].some(a=>{
+                    const u=new URL(a.href,location.href);
+                    return visible(a)&&a.textContent.trim()==='View resume'&&u.protocol==='https:'&&u.hostname==='www.linkedin.com'&&u.pathname==='/ambry/';
+                });
+                if(receipt) return true;
+                // Immediately after sending, the status card has no resume link
+                // yet. It appears only after hydration/reload in some variants.
+                let card=e.parentElement;
+                for(let depth=0;card&&depth<3;depth++,card=card.parentElement) {
+                    if([...card.querySelectorAll('h2')].some(h=>visible(h)&&h.textContent.trim()==='Application status')) return true;
+                }
+                return false;
+            });
+        }''')
+        if submitted_card is True:
+            signals.add('application submitted')
+        return signals
 
     def wait_linkedin_submission(self, page: Page, modal: Locator, before: set[str], timeout_seconds: float=25, expected_url: str | None=None) -> str:
         deadline = time.monotonic() + timeout_seconds
         while True:
-            if expected_url is not None and page.url != expected_url:
-                return 'submission_unconfirmed'
+            if expected_url is not None:
+                expected, current = urlparse(expected_url), urlparse(page.url)
+                if ((current.scheme, current.netloc, current.path.rstrip('/')) !=
+                        (expected.scheme, expected.netloc, expected.path.rstrip('/'))):
+                    return 'submission_unconfirmed'
             if self.core.linkedin_submission_signals(page) - before:
                 return 'applied'
             if modal.locator("[aria-invalid='true']:visible, .artdeco-inline-feedback--error:visible, [data-test-form-element-error-messages]:visible").count():
@@ -152,7 +181,9 @@ class LinkedInAdapter(PlatformAdapter):
 
     def search_url(self, keyword: str, location: str) -> str:
         s = self.core.CFG['search']
-        params = {'keywords': keyword, 'location': location, 'f_TPR': f'r{s['posted_within_hours'] * 3600}', 'sortBy': 'DD'}
+        params = {'keywords': keyword, 'location': location, 'sortBy': 'DD'}
+        if s.get('posted_within_hours') is not None:
+            params['f_TPR'] = f"r{s['posted_within_hours'] * 3600}"
         if not self.core.EXTERNAL:
             params['f_AL'] = 'true'
         if s.get('remote_only'):
@@ -176,9 +207,13 @@ class LinkedInAdapter(PlatformAdapter):
 
     def job_lists(self, page: Page):
         """Search only the regions selected by the user, not personalized feeds."""
+        if self.core.application_policy.active(self.core):
+            yield from self.core.policy_discovery.job_lists(self.core, page)
+            return
         locations = self.core.selected_locations()
         search = self.core.linkedin_search.LinkedInSearch(page, self.core)
         unsupported = set()
+        previous_failure = None
         try:
             for kw in self.core.CFG['search']['keywords']:
                 for loc in locations:
@@ -194,7 +229,17 @@ class LinkedInAdapter(PlatformAdapter):
                             self.core.log(f'  ! LinkedIn search not applied: {kw!r} @ {loc!r}: {e}')
                             if isinstance(e, self.core.linkedin_search.UnsupportedLocation):
                                 unsupported.add(loc)
+                                previous_failure = None
+                            else:
+                                failure = (type(e), str(e))
+                                if failure == previous_failure:
+                                    self.core.log('  ! LinkedIn search stopped after two identical consecutive errors; '
+                                                  'filters could not be verified. This does not mean there are no jobs. '
+                                                  'Run tools/linkedin_search_smoke.py to collect private diagnostics.')
+                                    return
+                                previous_failure = failure
                             break
+                        previous_failure = None
                         self.core.METRICS.mark('searches_verified', key)
                         found = result['ids']
                         self.core.log(f"  '{kw}' @ {loc}, page {index + 1}: {len(found)} jobs (region verified)")
@@ -241,7 +286,8 @@ class LinkedInAdapter(PlatformAdapter):
         return True
 
     def run_linkedin(self, page: Page, applied: dict, count: int) -> int:
-        if self.core.submission_quota_status('linkedin') or count >= self.core.CFG['limits']['max_applications_per_run']:
+        policy_run = self.core.application_policy.active(self.core)
+        if not policy_run and (self.core.submission_quota_status('linkedin') or count >= self.core.CFG['limits']['max_applications_per_run']):
             return count
         if not self.core.linkedin_login(page):
             return count
@@ -255,7 +301,8 @@ class LinkedInAdapter(PlatformAdapter):
                     visited.add(job_id)
                     if not self.core.should_visit_job(applied, job_id):
                         continue
-                    if count >= stop or self.core.submission_quota_status('linkedin') or time.time() > self.core.DEADLINE:
+                    if ((not policy_run and (count >= stop or self.core.submission_quota_status('linkedin')))
+                            or time.time() > self.core.DEADLINE):
                         raise self.core.LimitReached
                     with self.core.submission_source('linkedin'):
                         if self.core.process_job(page, applied, job_id):

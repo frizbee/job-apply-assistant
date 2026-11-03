@@ -124,6 +124,14 @@ def state() -> dict:
         "credentials": credentials,
         "english_levels": {k: v[0] for k, v in apply.ENGLISH_LEVELS.items()},
         "default_locations": apply.CFG["search"]["locations"],
+        'application_policy': {
+            'enabled': bool(apply.CFG.get('application_policy', {}).get('enabled')),
+            'minimum_percent': 70,
+            'resume': 'CV_Andre2026.pdf (project root)',
+            'titles': apply.application_policy.TITLES,
+            'scope': 'All non-Asian regions; ambiguous geography requires review',
+            'queue_file': str(apply.HOME / 'data/candidates.json'),
+        },
         "running": STATE["running"],
         "analyzing": STATE["analyzing"],
         "home": str(apply.HOME),
@@ -243,7 +251,9 @@ def start(body: dict, *, review_job_id: str | None = None) -> dict:
         if "error" in result:
             return result
         accepted_resume, accepted_hash = Path(apply.SETTINGS['resume']), apply.SETTINGS['cv_hash']
-        REVIEW_SESSION = apply.deferred_review.Session(review_job_id, apply.DRY_RUN, accepted_hash) if review_row else None
+        REVIEW_SESSION = apply.deferred_review.Session(
+            review_job_id, apply.DRY_RUN, accepted_hash, title=review_row['title'],
+            company=review_row['company'], job_url=review_row['job_url']) if review_row else None
         session = REVIEW_SESSION
 
         def worker():
@@ -445,6 +455,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, json.dumps(state()).encode())
         if self.path == '/api/deferred':
             return self.send(200, json.dumps(deferred_jobs()).encode())
+        if self.path == '/api/candidates':
+            return self.send(200, json.dumps(apply.candidate_workflow.store(apply).load()).encode())
         m = re.match(r"/api/log\?from=(\d+)", self.path)
         if m:
             i = int(m.group(1))
@@ -537,6 +549,7 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
 @media (max-width: 640px) { .grid, .grid3, .region-options { grid-template-columns: 1fr; } main { padding:20px 12px 40px; } .card { padding:16px; } .row > button, .row > a.btn { flex-basis:100%; } }
 </style></head>
 <body><main>
+<div id="policy_notice" class="notice hidden"></div>
 <header><h1>Auto Apply</h1>
 <div class="lang"><button data-l="en">EN</button><button data-l="tr">TR</button><button id="quit" data-t="quit"></button></div></header>
 
@@ -618,13 +631,14 @@ input.missing { border-color:#dc2626; background:#fef2f2; }
 <section class="card" id="deferred">
   <h2 data-t="deferred_title"></h2><p class="hint" data-t="deferred_hint"></p>
   <button class="secondary" id="refresh_deferred" data-t="refresh_deferred"></button>
-  <div id="deferred_jobs"></div>
-  <div id="review_panel" class="hidden">
+   <div id="review_panel" class="hidden">
+    <h3 id="review_job_title"></h3>
     <p id="review_status"></p><pre id="review_issues" style="white-space:pre-wrap"></pre>
     <p class="hint" data-t="review_browser_hint"></p>
    <div class="row"><button id="review_continue" data-t="review_continue"></button>
     <button class="secondary" id="review_skip" data-t="review_skip"></button></div>
-  </div>
+   </div>
+   <div id="deferred_jobs"></div>
   <div class="msg" id="review_message"></div>
 </section>
 </main>
@@ -762,6 +776,10 @@ function fill(p, show = true) {
 }
 async function load() {
   S = await api("/api/state");
+  if (S.application_policy?.enabled) {
+    $("policy_notice").textContent = "AGENTS.md policy is enabled: root CV, nine approved search titles, all non-Asian regions, evidence-based match ≥70%, no posting-age cutoff, all available pages, and external applications. These rules override legacy title/region/technology controls below. Candidates and blockers are saved in data/candidates.json. Missing model access leaves jobs pending for manual assessment; it does not reject them.";
+    $("policy_notice").classList.remove("hidden");
+  }
   if (S.cv_name) { $("cvname").textContent = S.cv_name; $("drop").classList.add("has"); }
   $("keybox").classList.toggle("hidden", S.has_key);
   $("changekey").classList.toggle("hidden", !S.has_key);
@@ -863,13 +881,18 @@ async function refreshDeferred() {
   try { r = await api('/api/deferred'); }
   catch (error) { if (!uiClosed) err('review_message', {error: 'review_unavailable'}); return; }
   if (uiClosed) return;
-  const root = $('deferred_jobs'); root.replaceChildren();
+   const root = $('deferred_jobs');
+   // Keep the live panel when rebuilding the queue that may currently own it.
+   $('deferred').insertBefore($('review_panel'), root);
+   root.replaceChildren();
   for (const [category, label] of [['manual', 'deferred_manual'], ['limit', 'deferred_limits']]) {
     const jobs = (r.jobs || []).filter(job => (job.category || 'manual') === category);
     const heading = document.createElement('h3'); heading.textContent = t(label) + ' (' + jobs.length + ')'; root.append(heading);
     for (const job of jobs) {
     const row = document.createElement('div'), title = document.createElement('h3'), reason = document.createElement('p');
-    row.className = 'deferred-job';
+     row.className = 'deferred-job';
+     row.dataset.jobIds = JSON.stringify(job.related_job_ids || [job.job_id]);
+     row.dataset.jobTitle = job.title; row.dataset.company = job.company;
     title.textContent = job.title + ' — ' + job.company;
     reason.textContent = job.reason + ((job.related_job_ids || []).length > 1 ? ' — ' + job.related_job_ids.length + ' listings / 1 ATS application' : '');
     row.append(title, reason);
@@ -908,14 +931,27 @@ async function refreshDeferred() {
     actions.append(sent); row.append(actions); root.append(row);
     }
   }
+  showReview(activeReview);
 }
 function showReview(review) {
+  const previous = activeReview;
   activeReview = review;
   $('review_panel').classList.toggle('hidden', !review);
   if (!review) return;
+  const rows = [...document.querySelectorAll('.deferred-job')];
+  const owner = rows.find(row => JSON.parse(row.dataset.jobIds || '[]').includes(review.job_id));
+  const panel = $('review_panel');
+  if (owner) owner.append(panel);
+  else $('deferred').insertBefore(panel, $('deferred_jobs'));
+  const title = review.title || owner?.dataset.jobTitle || review.job_id;
+  const company = review.company || owner?.dataset.company || '';
+  $('review_job_title').textContent = title + (company ? ' — ' + company : '') + ' (#' + review.job_id + ')';
   $('review_status').textContent = (review.test_mode ? 'TEST — ' : 'LIVE — ') + review.phase + (review.result ? ': ' + review.result : '');
   $('review_issues').textContent = review.issues.join('\n');
   $('review_continue').disabled = $('review_skip').disabled = review.phase !== 'waiting';
+  if (review.phase === 'waiting' && (previous?.job_id !== review.job_id || previous?.step !== review.step)) {
+    panel.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
 }
 async function reviewCommand(action) {
   if (!activeReview) return;

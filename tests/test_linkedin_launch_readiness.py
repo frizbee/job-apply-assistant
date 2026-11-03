@@ -10,6 +10,7 @@ import apply
 import deferred_review
 import gui
 import linkedin_forms
+from platforms import linkedin_location
 from test_answer_safety import SafetyTest
 
 
@@ -172,6 +173,79 @@ class BrowserLinkedinReadinessTests(SafetyTest):
         self.assertEqual(apply.fill_step(self.page, form), [])
         self.page.locator('fieldset').evaluate("e=>{const other=document.createElement('input');other.type='radio';other.name='screening';e.append(other)}")
         self.assertIn('Resume selection is not confirmed', apply.unconfirmed_radio_questions(form))
+
+    def test_fresh_upload_can_coexist_with_an_unselected_saved_resume(self):
+        form = self.load(self.upload_fixture())
+        self.assertEqual(apply.fill_step(self.page, form), [])
+        form.locator('input[type=radio]').evaluate("e=>e.name='documents'")
+        form.locator('fieldset').evaluate('''e=>{
+            e.insertAdjacentHTML('beforeend','<div role="radio" aria-label="reviewed.pdf" aria-checked="false"><input type="radio" name="documents"></div>');
+        }''')
+        self.assertEqual(apply.unconfirmed_radio_questions(form), [])
+        self.assertEqual(apply.fill_step(self.page, form), [])
+        self.assertEqual(self.page.evaluate('window.uploads'), 1)
+        # Selecting an older same-name file must invalidate the fresh-upload proof.
+        form.locator('input[type=radio]').last.evaluate('e=>e.checked=true')
+        self.assertIn('Resume selection is not confirmed', apply.unconfirmed_radio_questions(form))
+
+    def test_resume_group_does_not_exempt_other_questions_with_the_same_radio_name(self):
+        form = self.load(self.upload_fixture())
+        self.assertEqual(apply.fill_step(self.page, form), [])
+        form.locator('input[type=radio]').evaluate("e=>e.name='documents'")
+        form.locator('fieldset').evaluate('''e=>{
+            e.insertAdjacentHTML('beforeend','<div role="radio" aria-label="Citizenship" aria-checked="false"><input type="radio" name="documents"></div>');
+        }''')
+        self.assertIn('Resume selection is not confirmed', apply.unconfirmed_radio_questions(form))
+
+    def city_fixture(self, labels=None):
+        import json
+        labels = labels or ['Buenos Aires Province, Argentina', 'Buenos Aires, Buenos Aires Province, Argentina',
+                            'La Plata, Buenos Aires Province, Argentina', 'Buenos Aires, Buenos Aires Province, Argentina']
+        apply.PROFILE.update(city='Buenos Aires, Argentina', country='Argentina')
+        return '''<form><label for="city">Location (city)*</label>
+            <input id="city" aria-autocomplete="list" oninput="suggest()" aria-owns="cities"></form>
+            <div id="cities"></div><script>
+            function suggest(){setTimeout(()=>{
+                const root=document.getElementById('cities');root.innerHTML='';
+                for(const text of ''' + json.dumps(labels) + '''){
+                    const option=document.createElement('div');option.setAttribute('role','option');option.textContent=text;
+                    option.onclick=()=>{document.getElementById('city').value=text;root.innerHTML=''};
+                    root.appendChild(option);
+                }
+            },30)}
+            </script>'''
+
+    def test_city_selects_delayed_owned_suggestion_and_verifies_it(self):
+        form = self.load(self.city_fixture())
+        self.assertEqual(apply.fill_step(self.page, form), [])
+        self.assertEqual(form.locator('#city').input_value(), 'Buenos Aires, Buenos Aires Province, Argentina')
+        self.assertEqual(apply.unconfirmed_text_questions(form, external=False), [])
+        self.assertEqual(apply.fill_step(self.page, form), [])
+        self.assertFalse(self.page.locator('[role=option]').count())
+        # Merely retyping a previously accepted string is not an option selection.
+        field = form.locator('#city')
+        field.dispatch_event('input')
+        self.assertIn('Location (city)*', apply.unconfirmed_text_questions(form, external=False))
+
+    def test_typed_city_without_a_committed_option_is_not_confirmed(self):
+        form = self.load(self.city_fixture())
+        form.locator('#city').fill('Buenos Aires, Argentina')
+        self.assertIn('Location (city)*', apply.unconfirmed_text_questions(form, external=False))
+
+    def test_city_never_selects_another_country_or_province_only(self):
+        form = self.load(self.city_fixture(['Buenos Aires, Costa Rica', 'Buenos Aires Province, Argentina']))
+        self.assertIn('Location (city)*', apply.fill_step(self.page, form))
+        self.assertFalse(form.locator('#city').get_attribute(linkedin_location.PROOF))
+
+    def test_city_ambiguous_distinct_provinces_require_review(self):
+        form = self.load(self.city_fixture(['Buenos Aires, Province A, Argentina', 'Buenos Aires, Province B, Argentina']))
+        self.assertIn('Location (city)*', apply.fill_step(self.page, form))
+
+    def test_another_prefilled_residence_is_not_overwritten(self):
+        form = self.load(self.city_fixture())
+        form.locator('#city').evaluate("e=>e.value='Seattle, Washington, United States'")
+        self.assertIn('Location (city)*', apply.fill_step(self.page, form))
+        self.assertEqual(form.locator('#city').input_value(), 'Seattle, Washington, United States')
 
     def test_stalled_next_is_recorded_with_reason_and_deferred_instead_of_silent_retry(self):
         self.load('''<button type="button" onclick="document.querySelector('dialog').showModal()">Easy Apply</button>
