@@ -149,6 +149,12 @@ class Session:
 
 
 GUARD_JS = r"""(() => {
+    // Page init scripts also run in child frames. Never inject application
+    // submission guards into the provider's CAPTCHA UI: the user must be able
+    // to complete it normally. This does not supply answers/tokens or bypass it.
+    if (window.top !== window &&
+        ['www.google.com', 'www.recaptcha.net', 'recaptcha.google.com'].includes(location.hostname) &&
+        /^\/recaptcha\/(?:api2|enterprise)\/(?:anchor|bframe)(?:\/|$)/.test(location.pathname)) return;
     window.__autoapplyManualAllowSubmit = false;
     window.__autoapplyManualClickUsed = false;
     window.__autoapplyManualSubmitUsed = false;

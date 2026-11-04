@@ -101,6 +101,16 @@ NATIVE_FORM_DIAGNOSTICS_JS = r"""elements => {
                 if(!e.files?.length) reason='required';
             } else if(e.getAttribute('role')==='radiogroup') {
                 if(!e.querySelector('[aria-checked="true"],input:checked')) reason='required';
+            } else if(e.matches('fieldset,[role="group"]')&&
+                      e.querySelectorAll('input[type="checkbox"]').length===1&&
+                      !e.querySelector('input:not([type="hidden"]):not([type="checkbox"]),textarea,select,[role="combobox"]')) {
+                // Greenhouse puts aria-required on a fieldset as well as required
+                // on its sole acknowledgement checkbox. A checked native value
+                // satisfies that wrapper; fieldsets have no aria-valuetext.
+                const box=e.querySelector('input[type="checkbox"]');
+                if(box.disabled||box.getAttribute('aria-disabled')==='true'||!box.checked) reason='required';
+                else if(box.indeterminate||(box.hasAttribute('aria-checked')&&box.getAttribute('aria-checked')!==String(box.checked)))
+                    reason='selection_ambiguous';
             } else if(e.matches('.file-upload[role="group"]')) {
                 // Greenhouse replaces the file input after a completed upload.
                 // Its required group has neither value nor aria-valuetext.

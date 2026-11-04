@@ -1,5 +1,8 @@
 """Persistent candidate evaluation shared by bulk and chat-assisted LinkedIn."""
 import hashlib
+import os
+import json
+from datetime import date
 
 import application_policy as policy
 from application_queue import Store
@@ -16,12 +19,49 @@ def save(core, job, **fields):
                            metadata=job.get('metadata', {}), policy_version=policy.VERSION, **fields)
 
 
+def account_restriction(core, company):
+    record = store(core).load()['accounts'].get(company.strip().casefold())
+    if not record or record.get('status') != 'cooldown':
+        return None
+    retry_after = date.fromisoformat(record['retry_after'])
+    return record if date.today() < retry_after else None
+
+
+def observation_block(core, job_id, *, company='', title=''):
+    path = core.HOME / 'data' / 'application_observations.json'
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('jobs'), dict):
+        raise ValueError('Invalid application observations; do not bypass duplicate protection')
+    for observed_id, entry in data['jobs'].items():
+        same_role = (company and title and entry.get('company', '').strip().casefold() == company.strip().casefold()
+                     and resume_match.normalized(entry.get('title', '')) == resume_match.normalized(title))
+        if (observed_id == job_id or same_role) and entry.get('kind') == 'possible_duplicate' and entry.get('resolved') is not True:
+            return entry
+    return None
+
+
 def evaluate(core, job):
     """Always preserve the JD before model/network work; no-key means pending."""
     cv = core.ROOT / 'CV_Andre2026.pdf'
     digest = hashlib.sha256(cv.read_bytes()).hexdigest()
     jd_hash = hashlib.sha256(job.get('desc', '').encode()).hexdigest()
     previous = store(core).load()['jobs'].get(job['id'], {})
+    observation = observation_block(core, job['id'], company=job['company'], title=job['title'])
+    if observation:
+        return save(core, job, status='possible_duplicate', reason=observation['message'],
+            resume_sha256=digest, assessment=previous.get('assessment', {'score': None}),
+            qualifies=previous.get('qualifies', False),
+            blockers=[{'kind': 'duplicate', 'verdict': 'unknown', 'explanation': observation['message']}])
+    restriction = account_restriction(core, job['company'])
+    if restriction:
+        return save(core, job, status='account_cooldown', retry_after=restriction['retry_after'],
+            reason=restriction.get('reason', 'Shared application portal has an account cooldown'),
+            resume_sha256=digest, assessment=previous.get('assessment', {'score': None}),
+            qualifies=previous.get('qualifies', False),
+            blockers=[{'kind': 'account', 'verdict': 'unmet', 'explanation': restriction.get('reason'),
+                       'retry_after': restriction['retry_after']}])
     cached = previous.get('assessment', {})
     save(core, job, status='assessing', resume_sha256=digest)
     try:
@@ -31,6 +71,10 @@ def evaluate(core, job):
             evidence = resume_match.from_file(job.get('desc', ''), cv, minimum_percent=70,
                 review={'complete': True, 'criteria': cached['criteria'], 'blockers': cached['blockers']},
                 reviewer=cached.get('reviewer', 'saved-evidence'))
+        elif os.getenv('AUTOAPPLY_ASSESSMENT_MODE', 'auto') == 'manual':
+            evidence = resume_match.from_file(job.get('desc', ''), cv, minimum_percent=70)
+            if job.get('desc', '').strip() and evidence.get('score') is None:
+                evidence['diagnostic'] = 'Manual evidence assessment requested for this run'
         else:
             config = core.current_llm_config()
             if not config.legacy_supported:
@@ -93,6 +137,10 @@ def track(core, job_id, status, **fields):
 def submission_allowed(core, job_id):
     """Defense in depth: no active-policy send on a stale/unreviewed candidate."""
     entry = store(core).load()['jobs'].get(job_id, {})
+    if observation_block(core, job_id, company=entry.get('company', ''), title=entry.get('title', '')):
+        return False
+    if account_restriction(core, entry.get('company', '')):
+        return False
     assessment = entry.get('assessment', {})
     cv = core.ROOT / 'CV_Andre2026.pdf'
     score = assessment.get('score')

@@ -27,7 +27,9 @@ AFRICA = '''Algeria|Angola|Benin|Botswana|Burkina Faso|Burundi|Cabo Verde|Camero
 OCEANIA = '''Australia|New Zealand|Fiji|Kiribati|Marshall Islands|Micronesia|Nauru|Palau|Papua New Guinea|Samoa|Solomon Islands|Tonga|Tuvalu|Vanuatu|Cook Islands|Niue|New Caledonia|French Polynesia|Guam|American Samoa|Northern Mariana Islands|Tokelau|Wallis and Futuna|Norfolk Island|Pitcairn Islands'''.split('|')
 ASIA = '''Afghanistan|Bahrain|Bangladesh|Bhutan|Brunei|Cambodia|China|Hong Kong|India|Indonesia|Iran|Iraq|Israel|Japan|Jordan|Kuwait|Kyrgyzstan|Laos|Lebanon|Macao|Malaysia|Maldives|Mongolia|Myanmar|Nepal|North Korea|Oman|Pakistan|Palestine|Philippines|Qatar|Saudi Arabia|Singapore|South Korea|Sri Lanka|Syria|Taiwan|Tajikistan|Thailand|Timor-Leste|Turkmenistan|United Arab Emirates|Uzbekistan|Vietnam|Yemen'''.split('|')
 AMBIGUOUS = ['Russia', 'Turkey', 'Türkiye', 'Kazakhstan', 'Georgia', 'Armenia', 'Azerbaijan', 'Cyprus']
-LOCATIONS = list(dict.fromkeys(['Worldwide', 'Europe', 'Africa', 'Latin America', 'Caribbean', 'Oceania',
+LOCATIONS = list(dict.fromkeys(['Argentina', 'Latin America', 'United States', 'Canada',
+                               'European Union', 'European Economic Area', 'United Kingdom', 'Australia', 'New Zealand',
+                               'Worldwide', 'Europe', 'Africa', 'Caribbean', 'Oceania',
                                'Antarctica', 'South Georgia and the South Sandwich Islands', 'Bouvet Island',
                                *EUROPE, *AMERICAS, *AFRICA, *OCEANIA, *AMBIGUOUS]))
 REASSESSABLE = {'metadata_manual', 'title_not_relevant', 'relevance_manual', 'required_stack_incompatible',

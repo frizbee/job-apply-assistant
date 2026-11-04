@@ -6,6 +6,7 @@ All Playwright operations stay on the main thread. Browser fields are user-owned
 """
 import hashlib
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import queue
 import secrets
@@ -32,8 +33,8 @@ TITLES = application_policy.TITLES
 class Assisted:
     def __init__(self, context):
         self.context = context
-        self.search_page = context.new_page()
-        self.page = context.new_page()
+        self.search_page = context.pages[0] if context.pages else context.new_page()
+        self.page = self.search_page
         self.page.add_init_script(deferred_review.GUARD_JS)
         self.batches = policy_discovery.job_lists(apply, self.search_page)
         self.pending, self.seen, self.current = [], set(), None
@@ -42,6 +43,13 @@ class Assisted:
         self.history = apply.load_applied()
         self.cv = apply.ROOT / 'CV_Andre2026.pdf'
         self.cv_hash = hashlib.sha256(self.cv.read_bytes()).hexdigest()
+        if os.getenv('AUTOAPPLY_ASSESSMENT_MODE') == 'manual':
+            # Already captured full JDs remain queued for the agent's review.
+            # Do not reread all of them on every restart. /open always discards
+            # this marker and rechecks the current JD before opening a form.
+            self.seen.update(job_id for job_id, entry in candidate_workflow.store(apply).load()['jobs'].items()
+                             if entry.get('status') == 'needs_assessment' and entry.get('description', '').strip()
+                             and entry.get('resume_sha256') == self.cv_hash)
 
     def status(self):
         return {'current': self.current, 'url': self.page.url, 'seen': len(self.seen),
@@ -51,6 +59,7 @@ class Assisted:
     def search_next(self):
         if self.current:
             return {'error': 'Finish or explicitly skip the current application first', **self.status()}
+        self.history = apply.load_applied()  # Include manual sends reported since the previous search.
         checked = []
         deadline = time.monotonic() + 70
         while time.monotonic() < deadline:
@@ -71,6 +80,11 @@ class Assisted:
                 continue
             url = f'https://www.linkedin.com/jobs/view/{job_id}/'
             self.processing_job_id = job_id
+            if self.page.is_closed():
+                # A user may close the idle worker tab while looking at search
+                # results. No form is open here, so recreate only that worker.
+                self.page = self.context.new_page()
+                self.page.add_init_script(deferred_review.GUARD_JS)
             self.page.goto(url, wait_until='domcontentloaded')
             self.page.wait_for_timeout(1800)
             title, company, desc = apply.job_info(self.page)
@@ -123,6 +137,12 @@ class Assisted:
             self.page.wait_for_timeout(1500)
             if not apply.safe_https_url(self.page.url):
                 return {'error': 'Unsafe external redirect; candidate preserved'}
+            identity = apply.application_identity.application_key(self.page.url, apply)
+            duplicate = apply.application_identity.ledger(apply).submit_blocker(identity, row['job_id'], self.history, apply)
+            if duplicate:
+                candidate_workflow.store(apply).put(row['job_id'], status='external_duplicate',
+                    application_url=self.page.url, reason='Final ATS job is protected by existing application history')
+                return {'duplicate_protected': True, **self.status()}
             ats = apply.ats_provider(self.page.url)
             heading_texts = self.page.locator('h1:visible, h2:visible, [data-testid="job-title"]:visible').all_inner_texts()
             identity_verified = (any(resume_match.normalized(text) == resume_match.normalized(row['title']) for text in heading_texts)
@@ -131,11 +151,18 @@ class Assisted:
             if kind == 'external_trusted':
                 # Bind manual data-entry checks/submission to this approved ATS document.
                 self.ats_document = apply.trusted_ats_document(self.page, ats)
-                form = self.ats_document.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
+                stable = self.ats_document.locator('form#application-form')
+                form = stable if stable.count() == 1 else self.ats_document.locator("form:has(input[type='file']), form:has(textarea), form:has(input[type='email'])").first
                 if not form.count():
                     form = self.ats_document.locator('body')
                 apply.check_ats_form(self.page, self.ats_document, form, ats)
             else:
+                # Unsupported sites are human-controlled. Do not inject our
+                # submit guard into their login/CAPTCHA/multi-step widgets.
+                # Automatic /ready submission remains forbidden for this kind.
+                manual_page = self.context.new_page()
+                manual_page.goto(self.page.url, wait_until='domcontentloaded')
+                self.page = manual_page
                 form = self.page.locator('body')
         self.form = form
         self.current = {**row, 'kind': kind, 'document_url': self.page.url, 'step': secrets.token_hex(12),
@@ -180,6 +207,14 @@ class Assisted:
                     'instruction': 'Unknown site: automatic Submit is disabled. Ask the user to authorize manual sending; use /manual-send only after that consent.',
                     **self.status()}
         modal = self.form
+        if (current.get('kind') == 'external_trusted' and not modal.count()
+                and self.ats_document is not None and self.ats_document.count() == 1):
+            # Upload widgets may remove the last input/textarea used by an old
+            # selector. Reinspect only the same already-verified ATS document.
+            stable = self.ats_document.locator('form#application-form')
+            if stable.count() == 1 and stable.is_visible():
+                apply.check_ats_form(self.page, self.ats_document, stable, apply.ats_provider(self.page.url))
+                self.form = modal = stable
         if not modal.count() or not modal.is_visible():
             return {'error': 'Application form is no longer open'}
         issues = apply.native_form_issues(modal)
@@ -291,13 +326,20 @@ class Assisted:
 
     def reported_sent(self, body):
         current = self.current
-        if (not current or not current.get('manual_send_authorized') or body.get('reported_sent') is not True
+        if (not current or current.get('kind') != 'external_manual' or body.get('reported_sent') is not True
                 or body.get('job_id') != current['job_id']):
             return {'error': 'Explicit report of the current manual submission required'}
         history = apply.load_applied()
-        apply.record(history, current['job_id'], current['title'], current['company'],
-                     'submission_unconfirmed', current['document_url'])
+        apply.job_rechecks.backup([apply.APPLIED_FILE, apply.LOG_FILE, apply.MANUAL_FILE,
+                                  candidate_workflow.store(apply).path], apply.HOME / 'data/backups')
+        if not history.get(current['job_id'], {}).get('status', '').startswith('applied'):
+            apply.record_manual(current['job_id'], current['title'], current['company'], current['document_url'],
+                                'User reported sending outside the app; not independently confirmed. Do not retry.')
+            apply.record(history, current['job_id'], current['title'], current['company'],
+                         'submission_unconfirmed', current['document_url'])
+        self.history = history
         candidate_workflow.store(apply).put(current['job_id'], status='reported_sent',
+                                           user_reported_sent=True, independently_confirmed=False,
                                            reason='User reported sending; not independently confirmed')
         self.current = None
         return {'reported_sent': True, 'independently_confirmed': False}
@@ -348,7 +390,10 @@ def main():
             try:
                 path, body, result = tasks.get_nowait()
             except queue.Empty:
-                session.search_page.wait_for_timeout(200)
+                pump = next((page for page in context.pages if not page.is_closed()), None)
+                if pump is None:
+                    break  # Closing the browser is a stop, not permission to reopen it.
+                pump.wait_for_timeout(200)
                 continue
             try:
                 answer = (session.status() if path == '/status' else

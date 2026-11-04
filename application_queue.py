@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 
-PROTECTED = {'submission_pending', 'submission_unconfirmed', 'submission_rejected', 'reported_sent'}
+PROTECTED = {'submission_pending', 'submission_unconfirmed', 'submission_rejected', 'reported_sent', 'possible_duplicate'}
 
 
 def now():
@@ -22,13 +22,16 @@ class Store:
 
     def load(self):
         if not self.path.exists():
-            return {'version': 1, 'jobs': {}, 'searches': {}}
+            return {'version': 1, 'jobs': {}, 'searches': {}, 'accounts': {}}
         value = json.loads(self.path.read_text(encoding='utf-8'))
         if (not isinstance(value, dict) or value.get('version') != 1
                 or not isinstance(value.get('jobs'), dict) or not isinstance(value.get('searches'), dict)
                 or any(not isinstance(v, dict) for v in value['jobs'].values())
                 or any(not isinstance(v, dict) for v in value['searches'].values())):
             raise ValueError('Invalid candidate queue; restore a backup rather than bypassing history')
+        value.setdefault('accounts', {})
+        if not isinstance(value['accounts'], dict) or any(not isinstance(v, dict) for v in value['accounts'].values()):
+            raise ValueError('Invalid account restrictions in candidate queue')
         return value
 
     def write(self, value):
@@ -66,3 +69,9 @@ class Store:
         state['searches'][key] = {**state['searches'].get(key, {}), **fields, 'updated_at': now()}
         self.write(state)
         return state['searches'][key]
+
+    def account(self, key, **fields):
+        state = self.load()
+        state['accounts'][key] = {**state['accounts'].get(key, {}), **fields, 'updated_at': now()}
+        self.write(state)
+        return state['accounts'][key]

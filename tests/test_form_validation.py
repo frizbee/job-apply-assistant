@@ -87,6 +87,23 @@ class BrowserFormValidationTests(SafetyTest):
             <input type="radio" name="authorization" required aria-required="true" checked>
             <input type="radio" name="authorization" required aria-required="true"></fieldset>'''), [])
 
+    def test_greenhouse_required_single_acknowledgement_fieldset_accepts_checked_native_box(self):
+        self.assertEqual(self.issues('''<fieldset class="checkbox" aria-required="true">
+            <legend>AI guidelines*</legend><label><input type="checkbox" required checked>Acknowledge</label>
+            </fieldset>'''), [])
+        self.assertTrue(self.page.locator('input[type=checkbox]').is_checked())
+
+    def test_single_required_acknowledgement_is_not_inferred(self):
+        self.assertTrue(self.issues('''<fieldset aria-required="true"><legend>Recording policy*</legend>
+            <label><input type="checkbox" required>Acknowledge</label></fieldset>'''))
+        self.assertFalse(self.page.locator('input[type=checkbox]').is_checked())
+
+    def test_contradictory_or_disabled_single_acknowledgement_stays_manual(self):
+        for attrs in ['checked aria-checked="false"', 'checked disabled']:
+            with self.subTest(attrs=attrs):
+                self.assertTrue(self.issues(f'''<fieldset aria-required="true"><legend>Policy*</legend>
+                    <input type="checkbox" required {attrs}></fieldset>'''))
+
     def test_unbound_internal_id_is_not_presented_as_a_question(self):
         self.assertEqual(self.issues('<input id="question_12345" required>'), ['Required field — complete this required field'])
 

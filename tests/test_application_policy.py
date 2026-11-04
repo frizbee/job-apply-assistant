@@ -1,4 +1,5 @@
 import hashlib
+from datetime import date, timedelta
 import json
 from pathlib import Path
 import tempfile
@@ -87,6 +88,15 @@ class PolicyTests(SafetyTest):
         self.assertTrue(result['qualifies'])
         self.assertFalse((self.folder / 'data/applied.json').exists())
 
+    def test_per_run_manual_assessment_mode_does_not_call_api(self):
+        with patch.dict('os.environ', {'AUTOAPPLY_ASSESSMENT_MODE': 'manual'}), \
+                patch.object(apply, 'current_llm_config') as config, patch.object(apply, 'find_key') as key:
+            entry = candidate_workflow.evaluate(apply, self.job)
+            self.assertEqual(entry['status'], 'needs_assessment')
+            self.assertIn('requested for this run', entry['assessment']['diagnostic'])
+            config.assert_not_called()
+            key.assert_not_called()
+
     def test_high_score_retains_legal_blocker(self):
         self.job['desc'] += ' US authorization required.'
         candidate_workflow.evaluate(apply, self.job)
@@ -130,6 +140,32 @@ class PolicyTests(SafetyTest):
         candidate_workflow.store(apply).put('123', blockers=[])
         (self.folder / 'CV_Andre2026.pdf').write_bytes(b'replaced-cv')
         self.assertFalse(candidate_workflow.submission_allowed(apply, '123'))
+
+    def test_account_cooldown_blocks_all_roles_without_model_call(self):
+        retry_after = (date.today() + timedelta(days=180)).isoformat()
+        candidate_workflow.store(apply).account('proxify', status='cooldown', retry_after=retry_after,
+                                               reason='User reported shared-portal rejection cooldown')
+        with patch.object(apply, 'current_llm_config') as model:
+            for job_id, title in [('1', 'Senior Rails Developer'), ('2', 'Fullstack Rails Developer')]:
+                job = {**self.job, 'id': job_id, 'title': title, 'company': 'Proxify'}
+                entry = candidate_workflow.evaluate(apply, job)
+                self.assertEqual(entry['status'], 'account_cooldown')
+                self.assertEqual(entry['retry_after'], retry_after)
+                self.assertFalse(candidate_workflow.submission_allowed(apply, job_id))
+            model.assert_not_called()
+
+    def test_duplicate_warning_blocks_retry_without_claiming_a_submission(self):
+        path = self.folder / 'data/application_observations.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'version': 1, 'jobs': {'123': {
+            'kind': 'possible_duplicate', 'message': 'Maybe already applied',
+            'prior_submission_confirmed': False, 'new_application_sent_by_agent': False}}}), encoding='utf-8')
+        with patch.object(apply, 'current_llm_config') as model:
+            entry = candidate_workflow.evaluate(apply, self.job)
+            self.assertEqual(entry['status'], 'possible_duplicate')
+            self.assertFalse(candidate_workflow.submission_allowed(apply, '123'))
+            self.assertFalse((self.folder / 'data/applied.json').exists())
+            model.assert_not_called()
 
 
 class QueueTests(unittest.TestCase):

@@ -33,6 +33,10 @@ class ApprovalTests(unittest.TestCase):
         session = Assisted.__new__(Assisted)
         session.page = MagicMock()
         session.page.url = 'https://careers.example.org/application/123'
+        session.context = MagicMock()
+        manual_page = MagicMock(url=session.page.url)
+        manual_page.locator.return_value.inner_text.return_value = 'Application fields'
+        session.context.new_page.return_value = manual_page
         session.page.get_by_role.return_value.first.count.return_value = 0
         session.page.title.return_value = 'Employer application'
         session.page.locator.return_value.all_inner_texts.return_value = []
@@ -45,6 +49,7 @@ class ApprovalTests(unittest.TestCase):
             result = session.open_form(row)
             self.assertTrue(result['waiting_for_user'])
             self.assertEqual(session.current['kind'], 'external_manual')
+            manual_page.add_init_script.assert_not_called()
             store.return_value.put.assert_called_once()
             submit.assert_not_called()
 
